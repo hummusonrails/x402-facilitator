@@ -1,5 +1,5 @@
 import { keccak256, encodePacked, encodeAbiParameters, parseAbiParameters, recoverAddress, type Address } from 'viem';
-import type { EIP3009Authorization, EIP3009Signature } from './types';
+import type { EIP3009Authorization, EIP3009Signature } from './types.js';
 
 const EIP3009_TYPEHASH = keccak256(
   encodePacked(

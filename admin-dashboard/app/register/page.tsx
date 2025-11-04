@@ -45,7 +45,7 @@ export default function RegisterPage() {
     return (
       <div className="container" style={{ maxWidth: '800px', margin: '40px auto' }}>
         <div className="card">
-          <h1 style={{ color: '#28a745' }}>Registration Submitted!</h1>
+          <h1 style={{ color: '#28A0F0' }}>Registration Submitted!</h1>
           
           <div style={{ background: '#dc3545', padding: '20px', borderRadius: '8px', marginBottom: '20px', border: '3px solid #a71d2a' }}>
             <h3 style={{ marginTop: 0, color: '#fff' }}>CRITICAL: Save Your API Key Immediately</h3>
@@ -97,18 +97,18 @@ export default function RegisterPage() {
             </div>
           </div>
 
-          <div className="card" style={{ background: '#f8f9fa' }}>
-            <h3>What's Next?</h3>
-            <ol style={{ lineHeight: '1.8' }}>
-              <li><strong>Save your API key</strong> in a secure location (password manager, secrets vault)</li>
-              <li><strong>Wait for approval</strong> - An admin will review your request within 24 hours</li>
-              <li><strong>Receive notification</strong> - You'll be notified via email when approved</li>
-              <li><strong>Start integrating</strong> - Use the integration guide below</li>
+          <div className="card" style={{ border: '1px solid #28A0F0' }}>
+            <h3 style={{ color: '#28A0F0' }}>What's Next?</h3>
+            <ol style={{ lineHeight: '1.8', color: '#8b949e' }}>
+              <li><strong style={{ color: '#e6edf3' }}>Save your API key</strong> in a secure location (password manager, secrets vault)</li>
+              <li><strong style={{ color: '#e6edf3' }}>Wait for approval</strong> - An admin will review your request within 24 hours</li>
+              <li><strong style={{ color: '#e6edf3' }}>Receive notification</strong> - You'll be notified via email when approved</li>
+              <li><strong style={{ color: '#e6edf3' }}>Start integrating</strong> - Use the integration guide below</li>
             </ol>
           </div>
 
           <div style={{ marginTop: '30px' }}>
-            <h2>Integration Guide</h2>
+            <h2 style={{ color: '#28A0F0' }}>Integration Guide</h2>
             <IntegrationGuide merchantAddress={address} apiKey={apiKey} />
           </div>
         </div>
@@ -119,8 +119,8 @@ export default function RegisterPage() {
   return (
     <div className="container" style={{ maxWidth: '800px', margin: '40px auto' }}>
       <div className="card">
-        <h1>Register as a Merchant</h1>
-        <p style={{ fontSize: '16px', color: '#666', marginBottom: '30px' }}>
+        <h1 style={{ color: '#28A0F0' }}>Register as a Merchant</h1>
+        <p style={{ fontSize: '16px', color: '#8b949e', marginBottom: '30px' }}>
           Register your application to accept USDC payments via the x402 protocol on Arbitrum.
         </p>
 
@@ -136,7 +136,7 @@ export default function RegisterPage() {
               pattern="0x[a-fA-F0-9]{40}"
               title="Must be a valid Ethereum address"
             />
-            <small style={{ color: '#666', display: 'block', marginTop: '5px' }}>
+            <small style={{ color: '#8b949e', display: 'block', marginTop: '5px' }}>
               The address where you'll receive USDC payments
             </small>
           </div>
@@ -162,7 +162,7 @@ export default function RegisterPage() {
               placeholder="you@example.com"
               required
             />
-            <small style={{ color: '#666', display: 'block', marginTop: '5px' }}>
+            <small style={{ color: '#8b949e', display: 'block', marginTop: '5px' }}>
               We'll notify you when your application is approved
             </small>
           </div>
@@ -178,7 +178,7 @@ export default function RegisterPage() {
               maxLength={500}
               style={{ resize: 'vertical' }}
             />
-            <small style={{ color: '#666', display: 'block', marginTop: '5px' }}>
+            <small style={{ color: '#8b949e', display: 'block', marginTop: '5px' }}>
               {description.length}/500 characters
             </small>
           </div>
@@ -188,13 +188,13 @@ export default function RegisterPage() {
           </button>
         </form>
 
-        <div style={{ marginTop: '40px', padding: '20px', background: '#f8f9fa', borderRadius: '8px' }}>
-          <h3 style={{ marginTop: 0 }}>What happens after registration?</h3>
-          <ul style={{ lineHeight: '1.8' }}>
-            <li>You'll receive an API key immediately (save it securely!)</li>
-            <li>Your registration will be reviewed by an admin</li>
-            <li>Once approved, you can start accepting payments</li>
-            <li>You'll receive an email notification when approved</li>
+        <div className="card" style={{ marginTop: '40px', border: '1px solid #28A0F0' }}>
+          <h3 style={{ marginTop: 0, color: '#28A0F0' }}>What happens after registration?</h3>
+          <ul style={{ lineHeight: '1.8', color: '#8b949e' }}>
+            <li><strong style={{ color: '#e6edf3' }}>You'll receive an API key immediately</strong> (save it securely!)</li>
+            <li><strong style={{ color: '#e6edf3' }}>Your registration will be reviewed</strong> by an admin</li>
+            <li><strong style={{ color: '#e6edf3' }}>Once approved</strong>, you can start accepting payments</li>
+            <li><strong style={{ color: '#e6edf3' }}>You'll receive an email notification</strong> when approved</li>
           </ul>
         </div>
       </div>
@@ -204,26 +204,26 @@ export default function RegisterPage() {
 
 function IntegrationGuide({ merchantAddress, apiKey }: { merchantAddress: string; apiKey: string }) {
   return (
-    <div className="card" style={{ background: '#f8f9fa' }}>
-      <h3>Quick Start Integration</h3>
+    <div className="card" style={{ border: '1px solid #2d3e54' }}>
+      <h3 style={{ color: '#28A0F0' }}>Quick Start Integration</h3>
       
-      <h4>1. Install Dependencies</h4>
-      <pre style={{ background: '#fff', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code>npm install viem</code>
+      <h4 style={{ color: '#e6edf3' }}>1. Install Dependencies</h4>
+      <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
+        <code style={{ color: '#8b949e' }}>npm install viem</code>
       </pre>
 
-      <h4>2. Create Payment Requirements</h4>
-      <pre style={{ background: '#fff', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code>{`const paymentRequirements = {
+      <h4 style={{ color: '#e6edf3' }}>2. Create Payment Requirements</h4>
+      <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
+        <code style={{ color: '#8b949e' }}>{`const paymentRequirements = {
   merchantAddress: "${merchantAddress}",
   amount: 1000000 // 1 USDC (6 decimals)
   // Note: network and token are validated by facilitator
 };`}</code>
       </pre>
 
-      <h4>3. Return 402 Response</h4>
-      <pre style={{ background: '#fff', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code>{`// In your API endpoint
+      <h4 style={{ color: '#e6edf3' }}>3. Return 402 Response</h4>
+      <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
+        <code style={{ color: '#8b949e' }}>{`// In your API endpoint
 res.status(402).json({
   paymentRequirements,
   verifyEndpoint: "https://facilitator.example.com/verify",
@@ -231,15 +231,15 @@ res.status(402).json({
 });`}</code>
       </pre>
 
-      <h4>4. Settle Payment (Backend)</h4>
-      <div style={{ background: '#fff3cd', padding: '15px', borderRadius: '4px', marginBottom: '10px', border: '1px solid #ffc107' }}>
-        <strong style={{ color: '#856404' }}>Security Warning:</strong>
-        <p style={{ margin: '5px 0 0 0', color: '#856404' }}>
+      <h4 style={{ color: '#e6edf3' }}>4. Settle Payment (Backend)</h4>
+      <div style={{ background: '#3d2a00', padding: '15px', borderRadius: '4px', marginBottom: '10px', border: '1px solid #ffc107' }}>
+        <strong style={{ color: '#ffc107' }}>Security Warning:</strong>
+        <p style={{ margin: '5px 0 0 0', color: '#ffda6a' }}>
           Never expose your API key in client-side code! Always call the settlement endpoint from your backend server.
         </p>
       </div>
-      <pre style={{ background: '#fff', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code>{`// BACKEND ONLY: Never run this in the browser!
+      <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
+        <code style={{ color: '#8b949e' }}>{`// BACKEND ONLY: Never run this in the browser!
 const response = await fetch("https://facilitator.example.com/settle", {
   method: "POST",
   headers: {
@@ -259,25 +259,27 @@ if (result.success) {
 }`}</code>
       </pre>
 
-      <h4>5. Full Example</h4>
+      <h4 style={{ color: '#e6edf3' }}>5. Full Example</h4>
       <p>
         <a 
           href="https://github.com/hummusonrails/x402-facilitator/tree/main/x402-examples" 
           target="_blank"
-          style={{ color: '#007bff', textDecoration: 'none' }}
+          rel="noopener noreferrer"
+          style={{ color: '#28A0F0', textDecoration: 'none' }}
         >
           View complete integration examples →
         </a>
       </p>
 
-      <div style={{ marginTop: '20px', padding: '15px', background: '#d1ecf1', borderRadius: '4px', border: '1px solid #bee5eb' }}>
-        <strong style={{ color: '#0c5460' }}>Documentation:</strong>
-        <ul style={{ marginBottom: 0, color: '#0c5460' }}>
+      <div style={{ marginTop: '20px', padding: '15px', background: '#0d2438', borderRadius: '4px', border: '1px solid #28A0F0' }}>
+        <strong style={{ color: '#28A0F0' }}>Documentation:</strong>
+        <ul style={{ marginBottom: 0, color: '#8b949e' }}>
           <li>
             <a 
               href="https://github.com/hummusonrails/x402-facilitator/blob/main/docs/INTEGRATION_GUIDE.md" 
               target="_blank"
-              style={{ color: '#0c5460' }}
+              rel="noopener noreferrer"
+              style={{ color: '#28A0F0' }}
             >
               Full Integration Guide
             </a>
@@ -286,7 +288,8 @@ if (result.success) {
             <a 
               href="https://github.com/hummusonrails/x402-facilitator/blob/main/x402-examples/QUICK_START.md" 
               target="_blank"
-              style={{ color: '#0c5460' }}
+              rel="noopener noreferrer"
+              style={{ color: '#28A0F0' }}
             >
               Quick Start Guide
             </a>

@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { createLogger } from './logging';
+import { createLogger } from './logging.js';
 
 const logger = createLogger({ context: 'database' });
 

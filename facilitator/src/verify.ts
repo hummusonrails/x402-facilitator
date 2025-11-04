@@ -1,10 +1,10 @@
 import { Address } from 'viem';
-import { config, USDC_NAME, USDC_VERSION } from './config';
-import { verifyTransferAuthorization } from './eip3009';
-import { createIfAbsent } from './nonceStore';
-import { isDatabaseConfigured } from './db';
-import type { VerifyRequest, VerifyResponse, EIP3009Authorization, EIP3009Signature } from './types';
-import { Logger } from './logging';
+import { config, USDC_NAME, USDC_VERSION } from './config.js';
+import { verifyTransferAuthorization } from './eip3009.js';
+import { createIfAbsent } from './nonceStore.js';
+import { isDatabaseConfigured } from './db.js';
+import type { VerifyRequest, VerifyResponse, EIP3009Authorization, EIP3009Signature } from './types.js';
+import { Logger } from './logging.js';
 
 const usedNonces = new Set<string>();
 const useDatabase = isDatabaseConfigured();

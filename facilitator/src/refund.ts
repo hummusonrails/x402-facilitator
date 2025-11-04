@@ -1,9 +1,9 @@
 import { Address } from 'viem';
 import { createWalletClient, createPublicClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { config, FACILITATOR_PRIVATE_KEY } from './config';
-import { getPayment, setStatus, logPaymentEvent } from './nonceStore';
-import { createLogger } from './logging';
+import { config, FACILITATOR_PRIVATE_KEY } from './config.js';
+import { getPayment, setStatus, logPaymentEvent } from './nonceStore.js';
+import { createLogger } from './logging.js';
 
 const logger = createLogger({ context: 'refund' });
 

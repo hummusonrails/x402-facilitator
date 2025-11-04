@@ -21,7 +21,7 @@ export default function Login() {
       });
 
       if (res.ok) {
-        router.push('/');
+        router.push('/admin');
       } else {
         setError('Invalid credentials');
       }
@@ -33,7 +33,7 @@ export default function Login() {
   return (
     <div className="login-container">
       <div className="login-box">
-        <h1>X402 Admin Login</h1>
+        <h1 style={{ color: '#28A0F0' }}>X402arb Admin Login</h1>
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label>Username</label>

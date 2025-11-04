@@ -1,14 +1,14 @@
 import { createWalletClient, createPublicClient, http, WalletClient, PublicClient } from 'viem';
 import { Address } from 'viem';
-import { verifyPayment } from './verify';
-import { config, SERVICE_FEE_BPS, GAS_FEE_USDC, MAX_SETTLEMENT_AMOUNT } from './config';
-import { setStatus, logPaymentEvent } from './nonceStore';
-import { isDatabaseConfigured } from './db';
-import { getMerchantByAddress } from './merchantStore';
-import type { SettleRequest, SettleResponse } from './types';
-import { Logger } from './logging';
+import { verifyPayment } from './verify.js';
+import { config, SERVICE_FEE_BPS, GAS_FEE_USDC, MAX_SETTLEMENT_AMOUNT } from './config.js';
+import { setStatus, logPaymentEvent } from './nonceStore.js';
+import { isDatabaseConfigured } from './db.js';
+import { getMerchantByAddress } from './merchantStore.js';
+import type { SettleRequest, SettleResponse } from './types.js';
+import { Logger } from './logging.js';
 import { privateKeyToAccount } from 'viem/accounts';
-import { FACILITATOR_PRIVATE_KEY } from './config';
+import { FACILITATOR_PRIVATE_KEY } from './config.js';
 
 const useDatabase = isDatabaseConfigured();
 

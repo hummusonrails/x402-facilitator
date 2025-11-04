@@ -1,27 +1,27 @@
 import express, { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { privateKeyToAccount } from 'viem/accounts';
-import { config, FACILITATOR_PRIVATE_KEY, PORT, BODY_SIZE_LIMIT, RECOVERY_INTERVAL_MS, allNetworkConfigs, Network } from './config';
-import { verifyPayment } from './verify';
-import { settlePayment } from './settle';
-import { getHealth } from './health';
-import { createLogger, generateCorrelationId } from './logging';
-import { runStartupValidations } from './startup';
-import { startRecoveryWorker } from './recovery';
-import { isDatabaseConfigured } from './db';
-import { getAllMerchants } from './merchantStore';
-import { authenticateMerchant, authenticateAdmin, AuthenticatedRequest } from './auth';
-import { executeRefund } from './refund';
+import { config, FACILITATOR_PRIVATE_KEY, PORT, BODY_SIZE_LIMIT, RECOVERY_INTERVAL_MS, allNetworkConfigs, Network } from './config.js';
+import { verifyPayment } from './verify.js';
+import { settlePayment } from './settle.js';
+import { getHealth } from './health.js';
+import { createLogger, generateCorrelationId } from './logging.js';
+import { runStartupValidations } from './startup.js';
+import { startRecoveryWorker } from './recovery.js';
+import { isDatabaseConfigured } from './db.js';
+import { getAllMerchants } from './merchantStore.js';
+import { authenticateMerchant, authenticateAdmin, AuthenticatedRequest } from './auth.js';
+import { executeRefund } from './refund.js';
 import type {
   VerifyRequest,
   SettleRequest,
   SupportedResponse,
   SupportedPaymentKind,
-} from './types';
+} from './types.js';
 import {
   VerifyRequestSchema,
   SettleRequestSchema,
-} from './types';
+} from './types.js';
 
 const app = express();
 

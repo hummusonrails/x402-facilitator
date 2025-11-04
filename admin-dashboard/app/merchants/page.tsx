@@ -197,7 +197,7 @@ export default function MerchantsPage() {
   return (
     <div className="container">
       <div className="header">
-        <h1>Merchant Management</h1>
+        <h1 style={{ color: '#28A0F0' }}>Merchant Management</h1>
         <div>
           <button onClick={() => router.push('/admin')} className="btn btn-primary" style={{ marginRight: '10px' }}>
             Dashboard
@@ -209,21 +209,21 @@ export default function MerchantsPage() {
       </div>
 
       {emailNotification && (
-        <div className="card" style={{ background: emailNotification.type === 'approval' ? '#d4edda' : '#f8d7da', border: `1px solid ${emailNotification.type === 'approval' ? '#c3e6cb' : '#f5c6cb'}`, marginBottom: '20px' }}>
+        <div className="card" style={{ background: emailNotification.type === 'approval' ? '#0d3818' : '#3d1a1a', border: `1px solid ${emailNotification.type === 'approval' ? '#28A0F0' : '#dc3545'}`, marginBottom: '20px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div style={{ flex: 1 }}>
-              <h3 style={{ marginTop: 0, color: emailNotification.type === 'approval' ? '#155724' : '#721c24' }}>
+              <h3 style={{ marginTop: 0, color: '#28A0F0' }}>
                 {emailNotification.type === 'approval' ? 'Merchant Approved' : 'Merchant Rejected'} - Send Email Notification
               </h3>
-              <div style={{ marginBottom: '15px' }}>
-                <strong>To:</strong> {emailNotification.merchant.email}
+              <div style={{ marginBottom: '15px', color: '#e6edf3' }}>
+                <strong style={{ color: '#28A0F0' }}>To:</strong> {emailNotification.merchant.email}
               </div>
-              <div style={{ marginBottom: '15px' }}>
-                <strong>Subject:</strong> {emailNotification.type === 'approval' 
+              <div style={{ marginBottom: '15px', color: '#e6edf3' }}>
+                <strong style={{ color: '#28A0F0' }}>Subject:</strong> {emailNotification.type === 'approval' 
                   ? 'Your x402 Merchant Account Has Been Approved' 
                   : 'Your x402 Merchant Application Status'}
               </div>
-              <div style={{ background: 'white', padding: '15px', borderRadius: '4px', whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '14px' }}>
+              <div style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '14px', color: '#8b949e', border: '1px solid #2d3e54' }}>
                 {emailNotification.type === 'approval' ? (
                   `Hi ${emailNotification.merchant.name},
 
@@ -253,7 +253,7 @@ X402 Facilitator Team`
                 fontSize: '24px', 
                 cursor: 'pointer',
                 padding: '0 10px',
-                color: '#666'
+                color: '#8b949e'
               }}
             >
               ×
@@ -264,7 +264,7 @@ X402 Facilitator Team`
 
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <h2>Registered Merchants ({merchants.length})</h2>
+          <h2 style={{ color: '#28A0F0' }}>Registered Merchants ({merchants.length})</h2>
           <button 
             onClick={() => setShowAddForm(!showAddForm)} 
             className="btn btn-primary"
@@ -274,8 +274,8 @@ X402 Facilitator Team`
         </div>
 
         {showAddForm && (
-          <div className="card" style={{ background: '#f9f9f9', marginBottom: '20px' }}>
-            <h3>Add New Merchant</h3>
+          <div className="card" style={{ border: '1px solid #28A0F0', marginBottom: '20px' }}>
+            <h3 style={{ color: '#28A0F0' }}>Add New Merchant</h3>
             <form onSubmit={handleAddMerchant}>
               <div className="form-group">
                 <label>Merchant Address</label>
@@ -352,13 +352,13 @@ X402 Facilitator Team`
           <tbody>
             {merchants.length === 0 ? (
               <tr>
-                <td colSpan={9} style={{ textAlign: 'center', padding: '40px', color: '#999' }}>
+                <td colSpan={9} style={{ textAlign: 'center', padding: '40px', color: '#8b949e' }}>
                   No merchants registered. Click "Add Merchant" to get started.
                 </td>
               </tr>
             ) : (
               merchants.map((merchant) => (
-                <tr key={merchant.address} style={{ background: !merchant.approved ? '#fff3cd' : 'transparent' }}>
+                <tr key={merchant.address} style={{ background: !merchant.approved ? '#3d3000' : 'transparent' }}>
                   <td className="mono">{merchant.address.slice(0, 10)}...{merchant.address.slice(-8)}</td>
                   <td>{merchant.name}</td>
                   <td>{merchant.email || 'N/A'}</td>

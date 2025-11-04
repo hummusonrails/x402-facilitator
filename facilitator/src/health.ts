@@ -1,5 +1,5 @@
-import { config } from './config';
-import type { HealthResponse } from './types';
+import { config } from './config.js';
+import type { HealthResponse } from './types.js';
 
 export function getHealth(): HealthResponse {
   return {

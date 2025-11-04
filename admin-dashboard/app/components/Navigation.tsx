@@ -10,16 +10,17 @@ export default function Navigation() {
 
   return (
     <nav style={{
-      background: '#2c3e50',
+      background: '#213147',
       padding: '15px 30px',
       color: 'white',
       display: 'flex',
       justifyContent: 'space-between',
-      alignItems: 'center'
+      alignItems: 'center',
+      borderBottom: '2px solid #28A0F0'
     }}>
       <div style={{ fontSize: '20px', fontWeight: 'bold' }}>
-        <a href="/" style={{ color: 'white', textDecoration: 'none' }}>
-          X402 Facilitator
+        <a href="/" style={{ color: '#28A0F0', textDecoration: 'none' }}>
+          X402arb
         </a>
       </div>
       <div style={{ display: 'flex', gap: '20px' }}>
