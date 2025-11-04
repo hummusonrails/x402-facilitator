@@ -94,6 +94,7 @@ export interface HealthResponse {
   status: 'ok' | 'error';
   network: string;
   chainId: number;
+  facilitatorAddress: string;
   timestamp: number;
 }
 
