@@ -264,6 +264,7 @@ if (result.success) {
         <a 
           href="https://github.com/hummusonrails/x402-facilitator/tree/main/x402-examples" 
           target="_blank"
+          rel="noopener noreferrer"
           style={{ color: '#28A0F0', textDecoration: 'none' }}
         >
           View complete integration examples →
@@ -277,6 +278,7 @@ if (result.success) {
             <a 
               href="https://github.com/hummusonrails/x402-facilitator/blob/main/docs/INTEGRATION_GUIDE.md" 
               target="_blank"
+              rel="noopener noreferrer"
               style={{ color: '#28A0F0' }}
             >
               Full Integration Guide
@@ -286,6 +288,7 @@ if (result.success) {
             <a 
               href="https://github.com/hummusonrails/x402-facilitator/blob/main/x402-examples/QUICK_START.md" 
               target="_blank"
+              rel="noopener noreferrer"
               style={{ color: '#28A0F0' }}
             >
               Quick Start Guide
