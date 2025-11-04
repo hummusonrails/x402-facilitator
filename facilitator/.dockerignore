@@ -1,0 +1,31 @@
+# Environment variables (contains secrets)
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Database
+*.sql.gz
+backups/

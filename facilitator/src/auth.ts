@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcrypt';
-import { getAllMerchants, MerchantConfig } from './merchantStore';
-import { isDatabaseConfigured } from './db';
-import { createLogger } from './logging';
+import { getAllMerchants, MerchantConfig } from './merchantStore.js';
+import { isDatabaseConfigured } from './db.js';
+import { createLogger } from './logging.js';
 
 const logger = createLogger({ context: 'auth' });
 

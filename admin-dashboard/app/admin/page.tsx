@@ -97,7 +97,7 @@ export default function Dashboard() {
   return (
     <div className="container">
       <div className="header">
-        <h1>X402 Facilitator Admin</h1>
+        <h1 style={{ color: '#28A0F0' }}>X402arb: X402 Payment Facilitator Admin</h1>
         <div>
           <button onClick={() => router.push('/merchants')} className="btn btn-primary" style={{ marginRight: '10px' }}>
             Manage Merchants
@@ -130,7 +130,7 @@ export default function Dashboard() {
       </div>
 
       <div className="card">
-        <h2>Process Refund</h2>
+        <h2 style={{ color: '#28A0F0' }}>Process Refund</h2>
         <form onSubmit={handleRefund}>
           <div className="form-group">
             <label>Nonce</label>
@@ -159,7 +159,7 @@ export default function Dashboard() {
       </div>
 
       <div className="card">
-        <h2>Recent Payments</h2>
+        <h2 style={{ color: '#28A0F0' }}>Recent Payments</h2>
         <table>
           <thead>
             <tr>

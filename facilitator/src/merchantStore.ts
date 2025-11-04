@@ -1,5 +1,5 @@
-import { pool } from './db';
-import { createLogger } from './logging';
+import { pool } from './db.js';
+import { createLogger } from './logging.js';
 
 const logger = createLogger({ context: 'merchantStore' });
 

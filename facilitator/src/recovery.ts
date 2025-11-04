@@ -1,10 +1,10 @@
 import { Address } from 'viem';
-import { getIncompletePayments, setStatus, logPaymentEvent, PaymentRecord } from './nonceStore';
-import { createLogger } from './logging';
-import { config } from './config';
+import { getIncompletePayments, setStatus, logPaymentEvent, PaymentRecord } from './nonceStore.js';
+import { createLogger } from './logging.js';
+import { config } from './config.js';
 import { createWalletClient, createPublicClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { FACILITATOR_PRIVATE_KEY } from './config';
+import { FACILITATOR_PRIVATE_KEY } from './config.js';
 
 const logger = createLogger({ context: 'recovery' });
 

@@ -1,6 +1,6 @@
-import { withTx, pool } from './db';
+import { withTx, pool } from './db.js';
 import { createHash } from 'crypto';
-import { createLogger } from './logging';
+import { createLogger } from './logging.js';
 
 const logger = createLogger({ context: 'nonceStore' });
 

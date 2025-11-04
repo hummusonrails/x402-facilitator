@@ -1,7 +1,7 @@
 import { createPublicClient, http } from 'viem';
-import { config } from './config';
-import { createLogger } from './logging';
-import { testConnection, isDatabaseConfigured } from './db';
+import { config } from './config.js';
+import { createLogger } from './logging.js';
+import { testConnection, isDatabaseConfigured } from './db.js';
 
 const logger = createLogger({ context: 'startup' });
 
