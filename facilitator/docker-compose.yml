@@ -1,0 +1,26 @@
+# Docker Compose for local PostgreSQL database
+# Reads database credentials from .env file
+
+services:
+  # PostgreSQL database for persistent nonce storage
+  db:
+    image: postgres:16-alpine
+    container_name: x402-facilitator-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-facilitator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-facilitator}
+      POSTGRES_DB: ${POSTGRES_DB:-facilitator}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-facilitator}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+    driver: local
