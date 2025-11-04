@@ -85,7 +85,7 @@ if (isDatabaseConfigured()) {
 }
 
 app.get('/health', (req: Request, res: Response) => {
-  const health = getHealth();
+  const health = getHealth(facilitatorAddress);
   res.json(health);
 });
 

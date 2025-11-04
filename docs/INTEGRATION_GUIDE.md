@@ -23,6 +23,27 @@ Merchant Name: MyStore
 
 The facilitator will add you to their `MERCHANT_ADDRESSES` configuration.
 
+## Step 1.5: Get Facilitator Address
+
+Query the facilitator's `/health` endpoint to get its wallet address:
+
+```bash
+curl https://facilitator.example.com/health
+```
+
+Response:
+```json
+{
+  "status": "ok",
+  "network": "arbitrum-sepolia",
+  "chainId": 421614,
+  "facilitatorAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+  "timestamp": 1699000000000
+}
+```
+
+Use the `facilitatorAddress` value in your payment requirements.
+
 ## Step 2: Calculate Total Amount
 
 When creating a 402 response, calculate the total including fees:
@@ -120,12 +141,23 @@ import express from 'express';
 
 const app = express();
 
-// Facilitator configuration (get from facilitator operator)
-const FACILITATOR_ADDRESS = '0x...';
+// Facilitator configuration
 const FACILITATOR_URL = 'https://facilitator.example.com';
 const SERVICE_FEE_BPS = 50;
 const GAS_FEE_USDC = 100000;
 const MERCHANT_ADDRESS = '0xYOUR_ADDRESS';
+
+// Fetch facilitator address dynamically
+let FACILITATOR_ADDRESS: string;
+
+async function initializeFacilitator() {
+  const response = await fetch(`${FACILITATOR_URL}/health`);
+  const health = await response.json();
+  FACILITATOR_ADDRESS = health.facilitatorAddress;
+  console.log('Facilitator address:', FACILITATOR_ADDRESS);
+}
+
+initializeFacilitator();
 
 // Helper: Calculate total with fees
 function calculateTotalWithFees(merchantAmount: number) {

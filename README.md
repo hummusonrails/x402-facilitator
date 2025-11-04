@@ -132,13 +132,14 @@ docker run -p 3002:3002 --env-file .env x402-facilitator
 
 **`GET /health`**
 
-Health check with network information.
+Health check with network information and facilitator address.
 
 ```json
 {
   "status": "ok",
   "network": "arbitrum-sepolia",
   "chainId": 421614,
+  "facilitatorAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
   "timestamp": 1699000000000
 }
 ```
