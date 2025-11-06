@@ -203,63 +203,99 @@ export default function RegisterPage() {
 }
 
 function IntegrationGuide({ merchantAddress, apiKey }: { merchantAddress: string; apiKey: string }) {
+  const facilitatorUrl = process.env.NEXT_PUBLIC_FACILITATOR_URL || 'https://facilitator.example.com';
+  
   return (
     <div className="card" style={{ border: '1px solid #2d3e54' }}>
       <h3 style={{ color: '#28A0F0' }}>Quick Start Integration</h3>
       
-      <h4 style={{ color: '#e6edf3' }}>1. Install Dependencies</h4>
+      <div style={{ background: '#0d2438', padding: '15px', borderRadius: '4px', marginBottom: '20px', border: '1px solid #28A0F0' }}>
+        <strong style={{ color: '#28A0F0' }}>x402 Integration Pattern:</strong>
+        <p style={{ margin: '10px 0 0 0', color: '#8b949e' }}>
+          Clients only need the facilitator URL. The facilitator address and all payment requirements are provided dynamically.
+        </p>
+      </div>
+
+      <h4 style={{ color: '#e6edf3' }}>1. Environment Variables</h4>
       <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code style={{ color: '#8b949e' }}>npm install viem</code>
+        <code style={{ color: '#8b949e' }}>{`FACILITATOR_URL=${facilitatorUrl}
+MERCHANT_API_KEY=${apiKey.slice(0, 16)}...
+MERCHANT_ADDRESS=${merchantAddress}`}</code>
       </pre>
 
-      <h4 style={{ color: '#e6edf3' }}>2. Create Payment Requirements</h4>
-      <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code style={{ color: '#8b949e' }}>{`const paymentRequirements = {
-  merchantAddress: "${merchantAddress}",
-  amount: 1000000 // 1 USDC (6 decimals)
-  // Note: network and token are validated by facilitator
-};`}</code>
-      </pre>
-
-      <h4 style={{ color: '#e6edf3' }}>3. Return 402 Response</h4>
+      <h4 style={{ color: '#e6edf3' }}>2. Return 402 Response</h4>
       <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
         <code style={{ color: '#8b949e' }}>{`// In your API endpoint
 res.status(402).json({
-  paymentRequirements,
-  verifyEndpoint: "https://facilitator.example.com/verify",
-  settleEndpoint: "https://facilitator.example.com/settle"
+  error: "Payment required",
+  facilitatorUrl: "${facilitatorUrl}",
+  amount: "1000000", // 1 USDC (6 decimals)
+  merchantAddress: "${merchantAddress}",
+  description: "Access to premium content"
 });`}</code>
       </pre>
 
-      <h4 style={{ color: '#e6edf3' }}>4. Settle Payment (Backend)</h4>
+      <h4 style={{ color: '#e6edf3' }}>3. Client Fetches Requirements</h4>
+      <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
+        <code style={{ color: '#8b949e' }}>{`// Client-side: Fetch complete requirements from facilitator
+const requirements = await fetch('${facilitatorUrl}/requirements', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    amount: "1000000",
+    memo: "Premium content access",
+    extra: { merchantAddress: "${merchantAddress}" }
+  })
+}).then(r => r.json());
+
+// Response includes facilitator address and all required fields:
+// {
+//   network: "arbitrum-sepolia",
+//   token: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+//   recipient: "0xFACILITATOR_ADDRESS", // Provided by facilitator
+//   amount: "1100500", // Includes fees
+//   nonce: "0x...",
+//   deadline: 1731024000,
+//   ...
+// }`}</code>
+      </pre>
+
+      <h4 style={{ color: '#e6edf3' }}>4. Client Creates Permit</h4>
+      <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
+        <code style={{ color: '#8b949e' }}>{`// Client creates EIP-3009 permit using requirements
+const permit = await createPermit(requirements); // Using wallet`}</code>
+      </pre>
+
+      <h4 style={{ color: '#e6edf3' }}>5. Backend Settles Payment</h4>
       <div style={{ background: '#3d2a00', padding: '15px', borderRadius: '4px', marginBottom: '10px', border: '1px solid #ffc107' }}>
-        <strong style={{ color: '#ffc107' }}>Security Warning:</strong>
+        <strong style={{ color: '#ffc107' }}>Security Critical:</strong>
         <p style={{ margin: '5px 0 0 0', color: '#ffda6a' }}>
           Never expose your API key in client-side code! Always call the settlement endpoint from your backend server.
         </p>
       </div>
       <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
         <code style={{ color: '#8b949e' }}>{`// BACKEND ONLY: Never run this in the browser!
-const response = await fetch("https://facilitator.example.com/settle", {
+const response = await fetch("${facilitatorUrl}/settle", {
   method: "POST",
   headers: {
     "Content-Type": "application/json",
     "X-API-Key": "${apiKey.slice(0, 16)}..." // Your API key
   },
   body: JSON.stringify({
-    paymentPayload, // From client
-    paymentRequirements
+    paymentPayload: permit, // From client
+    paymentRequirements: requirements // From client
   })
 });
 
 const result = await response.json();
 if (result.success) {
   // Payment confirmed!
-  console.log("TX Hash:", result.outgoingTransactionHash);
+  console.log("TX Hash:", result.txHash);
+  console.log("Merchant TX:", result.outgoingTransactionHash);
 }`}</code>
       </pre>
 
-      <h4 style={{ color: '#e6edf3' }}>5. Full Example</h4>
+      <h4 style={{ color: '#e6edf3' }}>6. Full Example</h4>
       <p>
         <a 
           href="https://github.com/hummusonrails/x402-facilitator/tree/main/x402-examples" 
