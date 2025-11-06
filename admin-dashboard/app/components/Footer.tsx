@@ -9,8 +9,20 @@ export default function Footer() {
       textAlign: 'center',
       background: '#0a1628'
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '20px', color: '#8b949e' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '20px', color: '#8b949e', flexWrap: 'wrap' }}>
         <span>© {new Date().getFullYear()} Ben Greenberg</span>
+        <a
+          href="/terms-of-service"
+          style={{ color: '#8b949e', textDecoration: 'none' }}
+        >
+          Terms of Service
+        </a>
+        <a
+          href="/privacy-policy"
+          style={{ color: '#8b949e', textDecoration: 'none' }}
+        >
+          Privacy Policy
+        </a>
         <a
           href="https://github.com/hummusonrails/x402-facilitator"
           target="_blank"
