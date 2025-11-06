@@ -24,10 +24,9 @@ cp .env.example .env.local
 
 Edit `.env.local`:
 ```env
-FACILITATOR_URL=http://localhost:3002
+NEXT_PUBLIC_FACILITATOR_URL=http://localhost:3002
 MERCHANT_API_KEY=your_api_key_here
 MERCHANT_ADDRESS=0xYourMerchantAddress
-NEXT_PUBLIC_FACILITATOR_ADDRESS=0xFacilitatorAddress
 ```
 
 3. Start development server:
@@ -55,10 +54,21 @@ nextjs-app/
 ## Usage Flow
 
 1. User clicks "Purchase Content"
-2. Client creates EIP-3009 signature using MetaMask
-3. Client sends payment to backend API route
-4. Backend settles payment with facilitator
-5. Content is unlocked for user
+2. Client fetches payment requirements from facilitator (POST /requirements)
+3. Facilitator issues requirements with its own address as recipient
+4. Client creates EIP-3009 signature using MetaMask
+5. Client sends signed payload to backend API route
+6. Backend verifies and settles payment with facilitator
+7. Facilitator receives funds, forwards merchant net amount
+8. Content is unlocked for user
+
+## Integration Pattern
+
+This example demonstrates x402 integration where:
+- Client only needs facilitator URL
+- Facilitator address provided dynamically
+- Requirements fetched from the facilitator
+- Fee model enforced server-side
 
 ## Testing
 

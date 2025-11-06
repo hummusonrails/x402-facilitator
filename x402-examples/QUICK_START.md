@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-Get started with x402 payments in 5 minutes.
+Get started with x402 payment integration in 5 minutes.
 
 ## Prerequisites
 
@@ -85,9 +85,10 @@ npm run dev
 
 - [ ] Registered as merchant
 - [ ] Saved API key securely
-- [ ] Configured environment variables
-- [ ] Backend returns 402 responses
-- [ ] Client creates EIP-3009 signatures
+- [ ] Configured facilitator URL
+- [ ] Backend returns 402 with facilitator URL
+- [ ] Client fetches requirements from facilitator
+- [ ] Client creates EIP-3009 permit signatures
 - [ ] Backend settles with facilitator
 - [ ] Error handling implemented
 - [ ] Tested on Arbitrum Sepolia
