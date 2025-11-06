@@ -176,6 +176,27 @@ app.post('/verify', async (req: Request, res: Response) => {
       });
     }
     
+    // Validate that recipient matches facilitator address
+    if (!sdkReq.recipient) {
+      logger.warn('Verify request missing recipient field');
+      return res.status(400).json({
+        valid: false,
+        reason: 'Recipient field is required',
+      });
+    }
+    
+    // Case-insensitive comparison of recipient address
+    if (sdkReq.recipient.toLowerCase() !== facilitatorAddress.toLowerCase()) {
+      logger.warn('Recipient mismatch', {
+        provided: sdkReq.recipient,
+        expected: facilitatorAddress,
+      });
+      return res.status(400).json({
+        valid: false,
+        reason: 'Recipient must be the facilitator address',
+      });
+    }
+    
     const internalPayload = {
       x402Version: 1,
       scheme: 'exact',
@@ -261,6 +282,27 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
       return res.status(400).json({
         success: false,
         error: 'Invalid signature format',
+      });
+    }
+    
+    // Validate that recipient matches facilitator address
+    if (!sdkReq.recipient) {
+      logger.warn('Settle request missing recipient field');
+      return res.status(400).json({
+        success: false,
+        error: 'Recipient field is required',
+      });
+    }
+    
+    // Case-insensitive comparison of recipient address
+    if (sdkReq.recipient.toLowerCase() !== facilitatorAddress.toLowerCase()) {
+      logger.warn('Recipient mismatch', {
+        provided: sdkReq.recipient,
+        expected: facilitatorAddress,
+      });
+      return res.status(400).json({
+        success: false,
+        error: 'Recipient must be the facilitator address',
       });
     }
     

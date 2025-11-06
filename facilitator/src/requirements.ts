@@ -38,13 +38,14 @@ export function generateRequirements(request: RequirementsRequest): any {
     deadline,
     memo,
     extra: {
+      ...request.extra, // Spread client data first
+      // Facilitator-controlled fields - always override client values
       feeMode: 'facilitator_split',
       feeBps: SERVICE_FEE_BPS,
       gasBufferWei: GAS_FEE_USDC.toString(),
       ...(request.extra?.merchantAddress && {
         merchantAddress: request.extra.merchantAddress
-      }),
-      ...request.extra
+      })
     }
   };
 

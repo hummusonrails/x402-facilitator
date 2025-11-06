@@ -84,11 +84,12 @@ POSTGRES_DB=facilitator
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 
-# Facilitator private key
-FACILITATOR_PRIVATE_KEY=0x...
+# Facilitator private key (placeholder - use your actual private key)
+FACILITATOR_PRIVATE_KEY=0x0000000000000000000000000000000000000000000000000000000000000000
 
 # Admin API key hash (generate with: pnpm generate-api-key)
-ADMIN_API_KEY_HASH=$2b$10$...
+# Placeholder example - do not use in production
+ADMIN_API_KEY_HASH=$2b$10$placeholder.hash.do.not.use.in.production
 
 # Fee configuration
 SERVICE_FEE_BPS=50        # 0.5%
@@ -108,9 +109,19 @@ GAS_FEE_USDC=100000       # 0.1 USDC
 pnpm generate-api-key
 ```
 
-This generates:
-- API key (plain text - give to user)
-- Bcrypt hash (store in database or `.env`)
+Example output:
+```
+API Key (plain text - give to merchant securely):
+xyz_abc123def456...
+
+Bcrypt Hash (store in database or .env):
+$2b$10$abcdefghijklmnopqrstuvwxyz...
+```
+
+**Security Note:** 
+- Give the **API Key** (plain text) to the merchant securely
+- Store only the **Bcrypt Hash** in your database or `.env` file
+- Never store or transmit plain text API keys in your codebase
 
 ### Running
 
@@ -132,6 +143,8 @@ docker run -p 3002:3002 --env-file .env x402-facilitator
 ```
 
 ## API Endpoints
+
+**Important:** All code examples below use placeholder values. Never hardcode real API keys, private keys, or sensitive data in documentation or source code.
 
 ### Public Endpoints
 
@@ -178,9 +191,9 @@ Response:
 {
   "network": "arbitrum-sepolia",
   "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-  "recipient": "0xFACILITATOR_ADDRESS",
+  "recipient": "0xFACILITATOR_ADDRESS",  // Placeholder - actual facilitator address
   "amount": "1000000",
-  "nonce": "0x3c2d...ab",
+  "nonce": "0xEXAMPLE1234567890abcdef",  // Example nonce - unique per request
   "deadline": 1731024000,
   "memo": "",
   "extra": {
@@ -211,14 +224,14 @@ Response:
 {
   "network": "arbitrum",
   "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-  "recipient": "0xFACILITATOR_ADDRESS",
+  "recipient": "0xFACILITATOR_ADDRESS",  // Placeholder - actual facilitator address
   "amount": "2500000",
-  "nonce": "0x3c2d...ab",
+  "nonce": "0xEXAMPLE9876543210fedcba",  // Example nonce - unique per request
   "deadline": 1731024000,
   "memo": "Order #A1234",
   "extra": {
     "feeMode": "facilitator_split",
-    "merchantAddress": "0xMERCH...ADD",
+    "merchantAddress": "0xMERCHANTADDRESS1234567890abcdef",  // Placeholder merchant address
     "feeBps": 120,
     "gasBufferWei": "150000"
   }
@@ -234,18 +247,18 @@ Request:
 {
   "network": "arbitrum",
   "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-  "recipient": "0xANYTHING_IGNORED",
+  "recipient": "0xFACILITATOR_ADDRESS",  // Must match facilitator address
   "amount": "2500000",
-  "nonce": "0x3c2d...ab",
+  "nonce": "0xEXAMPLE9876543210fedcba",  // Example nonce - unique per request
   "deadline": 1731024000,
   "memo": "Order #A1234",
   "extra": {
-    "merchantAddress": "0xMERCH...ADD",
+    "merchantAddress": "0xMERCHANTADDRESS1234567890abcdef",  // Placeholder merchant address
     "feeMode": "facilitator_split"
   },
   "permit": {
-    "owner": "0xBUYER...",
-    "spender": "0xFACILITATOR_ADDRESS",
+    "owner": "0xBUYERADDRESS1234567890abcdef",  // Placeholder buyer address
+    "spender": "0xFACILITATOR_ADDRESS",  // Must match facilitator address
     "value": "2500000",
     "deadline": 1731024000,
     "sig": "0xSIG..."
@@ -272,7 +285,7 @@ Executes onchain settlement. Requires merchant API key. Accepts SDK-compatible f
 
 Headers:
 ```
-X-API-Key: merchant-api-key
+X-API-Key: your_merchant_api_key_here  # Placeholder - use your actual API key
 ```
 
 Request: Same format as `/verify` (SDK-compatible with permit)
@@ -584,7 +597,7 @@ const response = await fetch('https://facilitator.example.com/settle', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'X-API-Key': 'your-merchant-api-key',
+    'X-API-Key': 'your_merchant_api_key_here',  // Placeholder - use your actual API key
   },
   body: JSON.stringify({
     paymentPayload,
