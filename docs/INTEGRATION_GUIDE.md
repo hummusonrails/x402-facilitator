@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide explains how merchants integrate with your x402 facilitator service to accept payments with automatic fee handling.
+This guide explains how merchants integrate with the x402 facilitator. Merchants only need the facilitator URL; the facilitator address is provided dynamically.
 
 ## Payment Flow
 
@@ -23,81 +23,69 @@ Merchant Name: MyStore
 
 The facilitator will add you to their `MERCHANT_ADDRESSES` configuration.
 
-## Step 1.5: Get Facilitator Address
 
-Query the facilitator's `/health` endpoint to get its wallet address:
+## Step 2: Return 402 with Facilitator URL
 
-```bash
-curl https://facilitator.example.com/health
-```
-
-Response:
-```json
-{
-  "status": "ok",
-  "network": "arbitrum-sepolia",
-  "chainId": 421614,
-  "facilitatorAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
-  "timestamp": 1699000000000
-}
-```
-
-Use the `facilitatorAddress` value in your payment requirements.
-
-## Step 2: Calculate Total Amount
-
-When creating a 402 response, calculate the total including fees:
+When creating a 402 response, return the facilitator URL and payment details. The facilitator will calculate fees and provide complete requirements:
 
 ```typescript
 // Your merchant amount (what you want to receive)
 const merchantAmount = 1000000; // 1 USDC (6 decimals)
 
-// Facilitator fee configuration (get from facilitator)
-const SERVICE_FEE_BPS = 50;  // 0.5%
-const GAS_FEE_USDC = 100000; // 0.1 USDC
-
-// Calculate fees
-const serviceFee = Math.floor(merchantAmount * SERVICE_FEE_BPS / 10000);
-const totalAmount = merchantAmount + serviceFee + GAS_FEE_USDC;
-
-console.log({
-  merchantAmount,  // 1000000 (1.00 USDC)
-  serviceFee,      // 500     (0.005 USDC)
-  gasFee: GAS_FEE_USDC,  // 100000  (0.10 USDC)
-  totalAmount,     // 1100500 (1.105 USDC)
-});
-```
-
-## Step 3: Create 402 Response
-
-Return a 402 response with payment requirements:
-
-```typescript
-const paymentRequirements = {
-  scheme: 'exact',
-  network: 'arbitrum-sepolia', // or 'arbitrum' for mainnet
-  token: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // USDC address
-  amount: totalAmount.toString(), // TOTAL including fees
-  recipient: '0xFACILITATOR_ADDRESS', // ← Facilitator address, NOT yours!
-  description: `Premium content access - includes ${SERVICE_FEE_BPS/100}% service fee + gas`,
-  maxTimeoutSeconds: 300,
-  merchantAddress: '0xYOUR_MERCHANT_ADDRESS', // ← Your address (where funds go)
-};
-
+// Return 402 response
 res.status(402).json({
   error: 'Payment Required',
-  paymentRequirements,
-  facilitatorUrl: 'https://facilitator.example.com',
+  facilitatorUrl: process.env.FACILITATOR_URL,
+  amount: merchantAmount.toString(),
+  merchantAddress: process.env.MERCHANT_ADDRESS,
+  description: 'Premium content access',
 });
 ```
 
-### Critical Fields
+## Step 3: Client Fetches Requirements
 
-| Field | Value | Description |
-|-------|-------|-------------|
-| `amount` | Total with fees | User pays this amount |
-| `recipient` | Facilitator address | Payment goes here first |
-| `merchantAddress` | Your address | Where facilitator forwards payment |
+The client uses the facilitator URL to fetch complete payment requirements:
+
+```typescript
+const response = await fetch(`${facilitatorUrl}/requirements`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    amount: merchantAmount,
+    memo: description,
+    extra: { merchantAddress }
+  })
+});
+
+const requirements = await response.json();
+```
+
+The facilitator returns complete requirements including its own address:
+
+```json
+{
+  "network": "arbitrum-sepolia",
+  "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+  "recipient": "0xFACILITATOR_ADDRESS",
+  "amount": "1100500",
+  "nonce": "0x...",
+  "deadline": 1731024000,
+  "memo": "Premium content access",
+  "extra": {
+    "feeMode": "facilitator_split",
+    "merchantAddress": "0xYOUR_MERCHANT_ADDRESS",
+    "feeBps": 50,
+    "gasBufferWei": "100000"
+  }
+}
+```
+
+### Key Points
+
+- The `recipient` is the facilitator's address (set by facilitator)
+- The `amount` includes all fees (calculated by facilitator)
+- The `extra.merchantAddress` tells the facilitator where to forward funds
+- Client never needs to know or configure the facilitator address
 | `description` | Fee disclosure | Explain why amount > sticker price |
 
 ## Step 4: User Payment Flow
@@ -147,18 +135,6 @@ const SERVICE_FEE_BPS = 50;
 const GAS_FEE_USDC = 100000;
 const MERCHANT_ADDRESS = '0xYOUR_ADDRESS';
 
-// Fetch facilitator address dynamically
-let FACILITATOR_ADDRESS: string;
-
-async function initializeFacilitator() {
-  const response = await fetch(`${FACILITATOR_URL}/health`);
-  const health = await response.json();
-  FACILITATOR_ADDRESS = health.facilitatorAddress;
-  console.log('Facilitator address:', FACILITATOR_ADDRESS);
-}
-
-initializeFacilitator();
-
 // Helper: Calculate total with fees
 function calculateTotalWithFees(merchantAmount: number) {
   const serviceFee = Math.floor(merchantAmount * SERVICE_FEE_BPS / 10000);
@@ -179,16 +155,6 @@ app.get('/premium-content', (req, res) => {
   // Return 402 Payment Required
   res.status(402).json({
     error: 'Payment Required',
-    paymentRequirements: {
-      scheme: 'exact',
-      network: 'arbitrum-sepolia',
-      token: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
-      amount: fees.totalAmount.toString(),
-      recipient: FACILITATOR_ADDRESS, // Payment goes to facilitator
-      description: `Premium content - ${fees.merchantAmount/1e6} USDC + ${fees.serviceFee/1e6} service fee + ${fees.gasFee/1e6} gas`,
-      maxTimeoutSeconds: 300,
-      merchantAddress: MERCHANT_ADDRESS, // You receive this
-    },
     facilitatorUrl: FACILITATOR_URL,
     feeBreakdown: {
       contentPrice: `${fees.merchantAmount/1e6} USDC`,

@@ -1,6 +1,7 @@
 import { config as loadEnv } from 'dotenv';
 import { arbitrum, arbitrumSepolia } from 'viem/chains';
 import type { Chain } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 
 loadEnv();
 
@@ -50,10 +51,10 @@ const networkConfigs: Record<Network, NetworkConfig> = {
 
 export const config = networkConfigs[activeNetwork];
 
-let privateKey = process.env.FACILITATOR_PRIVATE_KEY || process.env.PRIVATE_KEY || '';
+let privateKey = process.env.EVM_PRIVATE_KEY || process.env.FACILITATOR_PRIVATE_KEY || process.env.PRIVATE_KEY || '';
 
 if (!privateKey) {
-  throw new Error('Missing FACILITATOR_PRIVATE_KEY environment variable');
+  throw new Error('Missing FACILITATOR_PRIVATE_KEY or EVM_PRIVATE_KEY environment variable');
 }
 
 if (!privateKey.startsWith('0x')) {
@@ -71,6 +72,9 @@ if (!hexPattern.test(privateKey)) {
 
 export const FACILITATOR_PRIVATE_KEY = privateKey as `0x${string}`;
 
+const facilitatorAccount = privateKeyToAccount(FACILITATOR_PRIVATE_KEY);
+export const FACILITATOR_ADDRESS = facilitatorAccount.address as `0x${string}`;
+
 export const PORT = parseInt(process.env.PORT || '3002', 10);
 export const BODY_SIZE_LIMIT = '100kb';
 export const MAX_SETTLEMENT_AMOUNT = BigInt(process.env.MAX_SETTLEMENT_AMOUNT || '1000000000');
@@ -87,5 +91,7 @@ if (SERVICE_FEE_BPS > MAX_SERVICE_FEE_BPS) {
 if (GAS_FEE_USDC > MAX_GAS_FEE_USDC) {
   throw new Error(`GAS_FEE_USDC (${GAS_FEE_USDC}) exceeds MAX_GAS_FEE_USDC (${MAX_GAS_FEE_USDC})`);
 }
+
+export const ALLOW_CLIENT_RECIPIENT = process.env.ALLOW_CLIENT_RECIPIENT === 'true';
 
 export const allNetworkConfigs = networkConfigs;

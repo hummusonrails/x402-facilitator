@@ -359,12 +359,24 @@ export async function settlePayment(
 
     return {
       success: true,
-      transactionHash: outgoingReceipt.transactionHash, // Final tx (to merchant)
-      incomingTransactionHash: incomingReceipt.transactionHash, // User → Facilitator
-      outgoingTransactionHash: outgoingReceipt.transactionHash, // Facilitator → Merchant
+      txHash: outgoingReceipt.transactionHash,
+      meta: {
+        journalId: paymentPayload.payload.nonce,
+        grossAmount: fees.totalAmount.toString(),
+        feeAmount: fees.facilitatorFee.toString(),
+        merchantNet: fees.merchantAmount.toString(),
+        forwardTxHash: outgoingReceipt.transactionHash,
+        incomingTxHash: incomingReceipt.transactionHash,
+        outgoingTxHash: outgoingReceipt.transactionHash,
+        blockNumber: Number(outgoingReceipt.blockNumber),
+        status: 'FORWARDED',
+      },
+      transactionHash: outgoingReceipt.transactionHash,
+      incomingTransactionHash: incomingReceipt.transactionHash,
+      outgoingTransactionHash: outgoingReceipt.transactionHash,
       blockNumber: Number(outgoingReceipt.blockNumber),
-      status: 'confirmed',
-      merchantAddress: merchantAddress, // Include for reconciliation
+      status: 'confirmed' as const,
+      merchantAddress: merchantAddress,
       feeBreakdown: {
         merchantAmount: fees.merchantAmount.toString(),
         serviceFee: fees.serviceFee.toString(),

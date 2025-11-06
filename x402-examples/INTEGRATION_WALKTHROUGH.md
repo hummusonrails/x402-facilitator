@@ -29,21 +29,18 @@ The x402 payment flow involves three parties:
 
 ## Step-by-Step Implementation
 
-### Step 1: Return 402 Payment Required
+### Step 1: Return 402 with Facilitator URL
 
 When a user requests a protected resource without payment:
 
 ```javascript
 app.get('/api/premium-content', (req, res) => {
-  const paymentRequirements = {
-    merchantAddress: YOUR_MERCHANT_ADDRESS,
-    amount: '1000000',
-    description: 'Premium content access',
-  };
-
   res.status(402).json({
     error: 'Payment required',
-    paymentRequirements,
+    facilitatorUrl: process.env.FACILITATOR_URL,
+    amount: '1000000',
+    merchantAddress: process.env.MERCHANT_ADDRESS,
+    description: 'Premium content access',
   });
 });
 ```

@@ -1,12 +1,22 @@
 # X402 Integration Examples
 
-Complete integration examples for the x402 payment protocol on Arbitrum.
+This directory contains working examples demonstrating x402 payment integration with the Arbitrum facilitator.
+
+## Integration Overview
+
+All examples use the x402 protocol where clients only need the facilitator URL (`NEXT_PUBLIC_FACILITATOR_URL` or `FACILITATOR_URL`). The facilitator address is provided dynamically through the `/requirements` endpoint.
 
 ## Getting Started
 
 **New to x402?** Start here:
 - [Quick Start Guide](./QUICK_START.md) - Get running in 5 minutes
 - [Integration Walkthrough](./INTEGRATION_WALKTHROUGH.md) - Step-by-step implementation guide
+
+## Quick Start
+
+1. Start the facilitator: `cd ../facilitator && pnpm dev`
+2. Choose an example and follow its README
+3. Configure only the facilitator URL in environment variables
 
 ## Examples
 

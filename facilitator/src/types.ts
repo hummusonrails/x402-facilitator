@@ -1,5 +1,12 @@
 import type { Address } from 'viem';
 import { z } from 'zod';
+import {
+  PaymentRequirementsSchema as SDKPaymentRequirementsSchema,
+  PaymentPayloadSchema as SDKPaymentPayloadSchema,
+  SupportedEVMNetworks,
+  type PaymentRequirements as SDKPaymentRequirements,
+  type PaymentPayload as SDKPaymentPayload,
+} from 'x402/types';
 
 // EIP-3009 Transfer with Authorization types
 export interface EIP3009Authorization {
@@ -65,12 +72,24 @@ export interface SettleRequest {
 
 export interface SettleResponse {
   success: boolean;
-  transactionHash?: string; // Final transaction (to merchant)
-  incomingTransactionHash?: string; // User to facilitator
-  outgoingTransactionHash?: string; // Facilitator to merchant
+  txHash?: string;
+  meta?: {
+    journalId?: string;
+    grossAmount?: string;
+    feeAmount?: string;
+    merchantNet?: string;
+    forwardTxHash?: string;
+    incomingTxHash?: string;
+    outgoingTxHash?: string;
+    blockNumber?: number;
+    status?: string;
+  };
+  transactionHash?: string;
+  incomingTransactionHash?: string;
+  outgoingTransactionHash?: string;
   blockNumber?: number;
   status?: 'confirmed' | 'pending';
-  merchantAddress?: string; // Final destination merchant (for reconciliation)
+  merchantAddress?: string;
   error?: string;
   feeBreakdown?: {
     merchantAmount: string;
@@ -94,7 +113,6 @@ export interface HealthResponse {
   status: 'ok' | 'error';
   network: string;
   chainId: number;
-  facilitatorAddress: string;
   timestamp: number;
 }
 
@@ -136,3 +154,91 @@ export const SettleRequestSchema = z.object({
   paymentPayload: PaymentPayloadSchema,
   paymentRequirements: PaymentRequirementsSchema,
 });
+
+export { SDKPaymentRequirementsSchema, SDKPaymentPayloadSchema, SupportedEVMNetworks };
+
+export interface SDKVerifyResponse {
+  valid: boolean;
+  reason: string | null;
+  meta?: {
+    journalId?: string;
+    facilitatorRecipient?: string;
+    feeBreakdown?: {
+      merchantAmount: string;
+      serviceFee: string;
+      gasFee: string;
+      totalAmount: string;
+    };
+  };
+}
+
+export interface SDKSettleResponse {
+  success: boolean;
+  txHash?: string;
+  meta?: {
+    journalId?: string;
+    grossAmount?: string;
+    feeAmount?: string;
+    merchantNet?: string;
+    forwardTxHash?: string;
+    status?: string;
+    incomingTxHash?: string;
+    outgoingTxHash?: string;
+    blockNumber?: number;
+  };
+}
+
+export interface RequirementsRequest {
+  amount?: string;
+  memo?: string;
+  currency?: string;
+  extra?: {
+    merchantAddress?: string;
+    [key: string]: any;
+  };
+}
+
+export type { SDKPaymentRequirements, SDKPaymentPayload };
+
+export const SDKVerifyRequestSchema = z.object({
+  network: z.string(),
+  token: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  recipient: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  amount: z.string(),
+  nonce: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
+  deadline: z.number(),
+  memo: z.string().optional(),
+  extra: z.object({
+    merchantAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+    feeMode: z.string().optional(),
+  }).passthrough().optional(),
+  permit: z.object({
+    owner: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+    spender: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+    value: z.string(),
+    deadline: z.number(),
+    sig: z.string(),
+  }),
+});
+
+export interface SDKVerifyRequest {
+  network: string;
+  token: string;
+  recipient: string;
+  amount: string;
+  nonce: string;
+  deadline: number;
+  memo?: string;
+  extra?: {
+    merchantAddress: string;
+    feeMode?: string;
+    [key: string]: any;
+  };
+  permit: {
+    owner: string;
+    spender: string;
+    value: string;
+    deadline: number;
+    sig: string;
+  };
+}

@@ -1,9 +1,10 @@
 import express, { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { privateKeyToAccount } from 'viem/accounts';
-import { config, FACILITATOR_PRIVATE_KEY, PORT, BODY_SIZE_LIMIT, RECOVERY_INTERVAL_MS, allNetworkConfigs, Network } from './config.js';
+import { config, FACILITATOR_PRIVATE_KEY, FACILITATOR_ADDRESS, PORT, BODY_SIZE_LIMIT, RECOVERY_INTERVAL_MS, allNetworkConfigs, Network } from './config.js';
 import { verifyPayment } from './verify.js';
 import { settlePayment } from './settle.js';
+import { generateRequirements } from './requirements.js';
 import { getHealth } from './health.js';
 import { createLogger, generateCorrelationId } from './logging.js';
 import { runStartupValidations } from './startup.js';
@@ -17,10 +18,13 @@ import type {
   SettleRequest,
   SupportedResponse,
   SupportedPaymentKind,
+  RequirementsRequest,
+  SDKVerifyRequest,
 } from './types.js';
 import {
   VerifyRequestSchema,
   SettleRequestSchema,
+  SDKVerifyRequestSchema,
 } from './types.js';
 
 const app = express();
@@ -60,8 +64,7 @@ const adminLimiter = rateLimit({
 
 app.use(generalLimiter);
 
-const facilitatorAccount = privateKeyToAccount(FACILITATOR_PRIVATE_KEY);
-const facilitatorAddress = facilitatorAccount.address;
+const facilitatorAddress = FACILITATOR_ADDRESS;
 
 console.log('='.repeat(60));
 console.log('X402 Facilitator for Arbitrum');
@@ -69,7 +72,6 @@ console.log('='.repeat(60));
 console.log(`Network:            ${config.network}`);
 console.log(`Chain ID:           ${config.chainId}`);
 console.log(`USDC Address:       ${config.usdcAddress}`);
-console.log(`Facilitator Address: ${facilitatorAddress}`);
 console.log(`RPC URL:            ${config.rpcUrl}`);
 console.log('='.repeat(60));
 console.log('');
@@ -85,7 +87,7 @@ if (isDatabaseConfigured()) {
 }
 
 app.get('/health', (req: Request, res: Response) => {
-  const health = getHealth(facilitatorAddress);
+  const health = getHealth();
   res.json(health);
 });
 
@@ -107,44 +109,143 @@ app.get('/supported', (req: Request, res: Response) => {
   res.json(response);
 });
 
+app.get('/requirements', (req: Request, res: Response) => {
+  const logger = (req as any).logger;
+  logger.info('GET /requirements');
+  
+  const requirements = generateRequirements({});
+  res.json(requirements);
+});
+
+app.post('/requirements', (req: Request, res: Response) => {
+  const logger = (req as any).logger;
+  logger.info('POST /requirements');
+  
+  try {
+    const request: RequirementsRequest = req.body;
+    const requirements = generateRequirements(request);
+    res.json(requirements);
+  } catch (error: any) {
+    logger.error('Requirements generation error', { error: error.message });
+    res.status(500).json({
+      error: 'Failed to generate requirements',
+      message: error.message,
+    });
+  }
+});
+
 app.post('/verify', async (req: Request, res: Response) => {
   const logger = (req as any).logger;
   
   try {
     logger.info('POST /verify');
 
-    const validation = VerifyRequestSchema.safeParse(req.body);
+    const validation = SDKVerifyRequestSchema.safeParse(req.body);
     if (!validation.success) {
-      logger.warn('Invalid request body', { errors: validation.error.errors });
+      logger.warn('Invalid SDK verify request', { errors: validation.error.errors });
       return res.status(400).json({
         valid: false,
-        invalidReason: 'Invalid request format',
-        errors: validation.error.errors,
+        reason: 'Invalid payment verification request format',
+        meta: { errors: validation.error.errors },
       });
     }
 
-    const request: VerifyRequest = validation.data;
+    const sdkReq: SDKVerifyRequest = validation.data;
     
-    if (!request.paymentRequirements.merchantAddress) {
-      logger.warn('Missing merchantAddress in payment requirements');
+    const merchantAddress = sdkReq.extra?.merchantAddress;
+    if (!merchantAddress) {
+      logger.warn('Missing merchantAddress in extra');
       return res.status(400).json({
         valid: false,
-        invalidReason: 'Missing merchantAddress in payment requirements',
+        reason: 'Missing merchantAddress in extra field',
       });
     }
     
-    const merchantAddress = request.paymentRequirements.merchantAddress as `0x${string}`;
+    const { permit } = sdkReq;
+    const sig = permit.sig;
+    let v: number, r: string, s: string;
     
-    const nonceLogger = logger.child({ nonce: request.paymentPayload.payload.nonce, merchant: merchantAddress });
+    if (sig.length === 132) {
+      r = '0x' + sig.slice(2, 66);
+      s = '0x' + sig.slice(66, 130);
+      v = parseInt(sig.slice(130, 132), 16);
+    } else {
+      return res.status(400).json({
+        valid: false,
+        reason: 'Invalid signature format',
+      });
+    }
+    
+    // Validate that recipient matches facilitator address
+    if (!sdkReq.recipient) {
+      logger.warn('Verify request missing recipient field');
+      return res.status(400).json({
+        valid: false,
+        reason: 'Recipient field is required',
+      });
+    }
+    
+    // Case-insensitive comparison of recipient address
+    if (sdkReq.recipient.toLowerCase() !== facilitatorAddress.toLowerCase()) {
+      logger.warn('Recipient mismatch', {
+        provided: sdkReq.recipient,
+        expected: facilitatorAddress,
+      });
+      return res.status(400).json({
+        valid: false,
+        reason: 'Recipient must be the facilitator address',
+      });
+    }
+    
+    const internalPayload = {
+      x402Version: 1,
+      scheme: 'exact',
+      network: sdkReq.network,
+      payload: {
+        from: permit.owner,
+        to: permit.spender,
+        value: permit.value,
+        validAfter: 0,
+        validBefore: permit.deadline,
+        nonce: sdkReq.nonce,
+        v,
+        r,
+        s,
+      }
+    };
+    
+    const internalRequirements = {
+      scheme: 'exact',
+      network: sdkReq.network,
+      token: sdkReq.token,
+      amount: sdkReq.amount,
+      recipient: facilitatorAddress,
+      description: sdkReq.memo || '',
+      maxTimeoutSeconds: 3600,
+      merchantAddress,
+    };
+    
+    const nonceLogger = logger.child({ nonce: sdkReq.nonce, merchant: merchantAddress });
 
-    const result = await verifyPayment(request, facilitatorAddress, merchantAddress, nonceLogger);
+    const result = await verifyPayment(
+      { paymentPayload: internalPayload, paymentRequirements: internalRequirements }, 
+      facilitatorAddress, 
+      merchantAddress as `0x${string}`, 
+      nonceLogger
+    );
     
-    res.json(result);
+    const sdkResponse = {
+      valid: result.valid,
+      reason: result.valid ? null : (result.invalidReason || 'Verification failed'),
+      ...(result.valid && { meta: { facilitatorRecipient: facilitatorAddress } })
+    };
+    
+    res.json(sdkResponse);
   } catch (error: any) {
     logger.error('Verify endpoint error', { error: error.message });
     res.status(500).json({
       valid: false,
-      invalidReason: 'Internal server error',
+      reason: 'Internal server error',
     });
   }
 });
@@ -156,24 +257,90 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
   try {
     logger.info('POST /settle', { merchant: authReq.merchant?.address });
 
-    const validation = SettleRequestSchema.safeParse(req.body);
+    const validation = SDKVerifyRequestSchema.safeParse(req.body);
     if (!validation.success) {
-      logger.warn('Invalid request body', { errors: validation.error.errors });
+      logger.warn('Invalid SDK settle request', { errors: validation.error.errors });
       return res.status(400).json({
         success: false,
-        error: 'Invalid request format',
-        details: validation.error.errors,
+        error: 'Invalid settlement request format',
+        meta: { errors: validation.error.errors },
       });
     }
 
-    const request: SettleRequest = validation.data;
-    
+    const sdkReq: SDKVerifyRequest = validation.data;
     const merchantAddress = authReq.merchant!.address as `0x${string}`;
     
-    // Add nonce to logger context
-    const nonceLogger = logger.child({ nonce: request.paymentPayload.payload.nonce, merchant: merchantAddress });
+    const { permit } = sdkReq;
+    const sig = permit.sig;
+    let v: number, r: string, s: string;
+    
+    if (sig.length === 132) {
+      r = '0x' + sig.slice(2, 66);
+      s = '0x' + sig.slice(66, 130);
+      v = parseInt(sig.slice(130, 132), 16);
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid signature format',
+      });
+    }
+    
+    // Validate that recipient matches facilitator address
+    if (!sdkReq.recipient) {
+      logger.warn('Settle request missing recipient field');
+      return res.status(400).json({
+        success: false,
+        error: 'Recipient field is required',
+      });
+    }
+    
+    // Case-insensitive comparison of recipient address
+    if (sdkReq.recipient.toLowerCase() !== facilitatorAddress.toLowerCase()) {
+      logger.warn('Recipient mismatch', {
+        provided: sdkReq.recipient,
+        expected: facilitatorAddress,
+      });
+      return res.status(400).json({
+        success: false,
+        error: 'Recipient must be the facilitator address',
+      });
+    }
+    
+    const internalPayload = {
+      x402Version: 1,
+      scheme: 'exact',
+      network: sdkReq.network,
+      payload: {
+        from: permit.owner,
+        to: permit.spender,
+        value: permit.value,
+        validAfter: 0,
+        validBefore: permit.deadline,
+        nonce: sdkReq.nonce,
+        v,
+        r,
+        s,
+      }
+    };
+    
+    const internalRequirements = {
+      scheme: 'exact',
+      network: sdkReq.network,
+      token: sdkReq.token,
+      amount: sdkReq.amount,
+      recipient: facilitatorAddress,
+      description: sdkReq.memo || '',
+      maxTimeoutSeconds: 3600,
+      merchantAddress: merchantAddress,
+    };
+    
+    const nonceLogger = logger.child({ nonce: sdkReq.nonce, merchant: merchantAddress });
 
-    const result = await settlePayment(request, merchantAddress, nonceLogger);
+    const result = await settlePayment(
+      { paymentPayload: internalPayload, paymentRequirements: internalRequirements },
+      merchantAddress,
+      nonceLogger
+    );
     
     if (result.success) {
       res.json(result);
@@ -257,11 +424,16 @@ async function startServer() {
     app.listen(PORT, () => {
       console.log(`X402 Facilitator listening at http://localhost:${PORT}`);
       console.log('');
-      console.log('Endpoints:');
-      console.log(`  GET  http://localhost:${PORT}/health     - Health check`);
-      console.log(`  GET  http://localhost:${PORT}/supported  - Supported payment kinds`);
-      console.log(`  POST http://localhost:${PORT}/verify     - Verify payment payload`);
-      console.log(`  POST http://localhost:${PORT}/settle     - Execute payment settlement`);
+      console.log('Public Endpoints:');
+      console.log(`  GET  http://localhost:${PORT}/health          - Health check`);
+      console.log(`  GET  http://localhost:${PORT}/supported       - Supported payment kinds`);
+      console.log(`  GET  http://localhost:${PORT}/requirements    - Get default payment requirements`);
+      console.log(`  POST http://localhost:${PORT}/requirements    - Generate payment requirements`);
+      console.log(`  POST http://localhost:${PORT}/verify          - Verify payment payload`);
+      console.log('');
+      console.log('Authenticated Endpoints:');
+      console.log(`  POST http://localhost:${PORT}/settle          - Execute payment settlement (merchant)`);
+      console.log(`  POST http://localhost:${PORT}/admin/refund    - Execute refund (admin)`);
       console.log('');
     });
   } catch (error: any) {

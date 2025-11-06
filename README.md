@@ -15,6 +15,11 @@ This facilitator enables merchants to accept USDC payments on Arbitrum using the
 - Support for multiple registered merchants
 - Strict validation of network, token, recipient, amount, and timing
 
+**SDK Compatibility**
+- Wire-level compatibility with [x402 SDK](https://www.npmjs.com/package/@coinbase/x402) schemas
+- Server-side fee model enforcement
+- Dynamic requirements generation via `/requirements` endpoints
+
 **Reliability and Recovery**
 - PostgreSQL-based persistent nonce storage with advisory locks
 - Automatic recovery worker for incomplete settlements
@@ -79,11 +84,12 @@ POSTGRES_DB=facilitator
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 
-# Facilitator private key
-FACILITATOR_PRIVATE_KEY=0x...
+# Facilitator private key (placeholder - use your actual private key)
+FACILITATOR_PRIVATE_KEY=0x0000000000000000000000000000000000000000000000000000000000000000
 
 # Admin API key hash (generate with: pnpm generate-api-key)
-ADMIN_API_KEY_HASH=$2b$10$...
+# Placeholder example - do not use in production
+ADMIN_API_KEY_HASH=$2b$10$placeholder.hash.do.not.use.in.production
 
 # Fee configuration
 SERVICE_FEE_BPS=50        # 0.5%
@@ -103,9 +109,19 @@ GAS_FEE_USDC=100000       # 0.1 USDC
 pnpm generate-api-key
 ```
 
-This generates:
-- API key (plain text - give to user)
-- Bcrypt hash (store in database or `.env`)
+Example output:
+```
+API Key (plain text - give to merchant securely):
+xyz_abc123def456...
+
+Bcrypt Hash (store in database or .env):
+$2b$10$abcdefghijklmnopqrstuvwxyz...
+```
+
+**Security Note:** 
+- Give the **API Key** (plain text) to the merchant securely
+- Store only the **Bcrypt Hash** in your database or `.env` file
+- Never store or transmit plain text API keys in your codebase
 
 ### Running
 
@@ -128,18 +144,19 @@ docker run -p 3002:3002 --env-file .env x402-facilitator
 
 ## API Endpoints
 
+**Important:** All code examples below use placeholder values. Never hardcode real API keys, private keys, or sensitive data in documentation or source code.
+
 ### Public Endpoints
 
 **`GET /health`**
 
-Health check with network information and facilitator address.
+Health check with network information.
 
 ```json
 {
   "status": "ok",
   "network": "arbitrum-sepolia",
   "chainId": 421614,
-  "facilitatorAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
   "timestamp": 1699000000000
 }
 ```
@@ -165,37 +182,39 @@ Returns supported payment kinds.
 }
 ```
 
-**`POST /verify`**
+**`GET /requirements`**
 
-Verifies payment payload without executing settlement. No authentication required.
+Returns default payment requirements with facilitator address.
+
+Response:
+```json
+{
+  "network": "arbitrum-sepolia",
+  "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+  "recipient": "0xFACILITATOR_ADDRESS",  // Placeholder - actual facilitator address
+  "amount": "1000000",
+  "nonce": "0xEXAMPLE1234567890abcdef",  // Example nonce - unique per request
+  "deadline": 1731024000,
+  "memo": "",
+  "extra": {
+    "feeMode": "facilitator_split",
+    "feeBps": 50,
+    "gasBufferWei": "100000"
+  }
+}
+```
+
+**`POST /requirements`**
+
+Generates payment requirements with specific amount and merchant address.
 
 Request:
 ```json
 {
-  "paymentPayload": {
-    "scheme": "exact",
-    "network": "arbitrum-sepolia",
-    "payload": {
-      "from": "0x...",
-      "to": "0xFacilitatorAddress",
-      "value": "1105000",
-      "validAfter": 0,
-      "validBefore": 1735689600,
-      "nonce": "0x...",
-      "v": 27,
-      "r": "0x...",
-      "s": "0x..."
-    }
-  },
-  "paymentRequirements": {
-    "scheme": "exact",
-    "network": "arbitrum-sepolia",
-    "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-    "amount": "1105000",
-    "recipient": "0xFacilitatorAddress",
-    "merchantAddress": "0xMerchantAddress",
-    "description": "Payment for service",
-    "maxTimeoutSeconds": 300
+  "amount": "2500000",
+  "memo": "Order #A1234",
+  "extra": {
+    "merchantAddress": "0xMERCH...ADD"
   }
 }
 ```
@@ -203,7 +222,58 @@ Request:
 Response:
 ```json
 {
-  "valid": true
+  "network": "arbitrum",
+  "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+  "recipient": "0xFACILITATOR_ADDRESS",  // Placeholder - actual facilitator address
+  "amount": "2500000",
+  "nonce": "0xEXAMPLE9876543210fedcba",  // Example nonce - unique per request
+  "deadline": 1731024000,
+  "memo": "Order #A1234",
+  "extra": {
+    "feeMode": "facilitator_split",
+    "merchantAddress": "0xMERCHANTADDRESS1234567890abcdef",  // Placeholder merchant address
+    "feeBps": 120,
+    "gasBufferWei": "150000"
+  }
+}
+```
+
+**`POST /verify`**
+
+Verifies payment payload without executing settlement. No authentication required. Accepts SDK-compatible format.
+
+Request:
+```json
+{
+  "network": "arbitrum",
+  "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+  "recipient": "0xFACILITATOR_ADDRESS",  // Must match facilitator address
+  "amount": "2500000",
+  "nonce": "0xEXAMPLE9876543210fedcba",  // Example nonce - unique per request
+  "deadline": 1731024000,
+  "memo": "Order #A1234",
+  "extra": {
+    "merchantAddress": "0xMERCHANTADDRESS1234567890abcdef",  // Placeholder merchant address
+    "feeMode": "facilitator_split"
+  },
+  "permit": {
+    "owner": "0xBUYERADDRESS1234567890abcdef",  // Placeholder buyer address
+    "spender": "0xFACILITATOR_ADDRESS",  // Must match facilitator address
+    "value": "2500000",
+    "deadline": 1731024000,
+    "sig": "0xSIG..."
+  }
+}
+```
+
+Response:
+```json
+{
+  "valid": true,
+  "reason": null,
+  "meta": {
+    "facilitatorRecipient": "0xFACILITATOR_ADDRESS"
+  }
 }
 ```
 
@@ -211,30 +281,42 @@ Response:
 
 **`POST /settle`**
 
-Executes onchain settlement. Requires merchant API key.
+Executes onchain settlement. Requires merchant API key. Accepts SDK-compatible format.
 
 Headers:
 ```
-X-API-Key: merchant-api-key
+X-API-Key: your_merchant_api_key_here  # Placeholder - use your actual API key
 ```
 
-Request: Same as `/verify`
+Request: Same format as `/verify` (SDK-compatible with permit)
 
 Response:
 ```json
 {
   "success": true,
-  "transactionHash": "0x...",
-  "incomingTransactionHash": "0x...",
-  "outgoingTransactionHash": "0x...",
+  "txHash": "0xONCHAIN...",
+  "meta": {
+    "journalId": "0x3c2d...ab",
+    "grossAmount": "2500000",
+    "feeAmount": "30000",
+    "merchantNet": "2470000",
+    "forwardTxHash": "0xFORWARD...",
+    "incomingTxHash": "0xINCOMING...",
+    "outgoingTxHash": "0xOUTGOING...",
+    "blockNumber": 12345678,
+    "status": "FORWARDED"
+  },
+  "transactionHash": "0xONCHAIN...",
+  "incomingTransactionHash": "0xINCOMING...",
+  "outgoingTransactionHash": "0xOUTGOING...",
   "blockNumber": 12345678,
   "status": "confirmed",
-  "merchantAddress": "0x...",
+  "merchantAddress": "0xMERCH...",
   "feeBreakdown": {
-    "merchantAmount": "1000000",
-    "serviceFee": "5000",
+    "merchantAmount": "2470000",
+    "serviceFee": "12350",
     "gasFee": "100000",
-    "totalAmount": "1105000"
+    "totalAmount": "2500000"
   }
 }
 ```
@@ -424,6 +506,55 @@ FROM payments
 GROUP BY status;
 ```
 
+## Client Integration
+
+### Overview
+
+Clients integrate with the facilitator using the facilitator URL. The facilitator's address is provided dynamically through the requirements endpoint, simplifying client implementation and allowing the facilitator to manage the fee model server-side.
+
+### Integration Flow
+
+1. **Fetch Requirements**: Client calls `POST /requirements` with amount and merchant address
+2. **Receive Complete Requirements**: Facilitator returns all necessary fields including its own address as recipient
+3. **Create Permit**: Client creates EIP-3009 permit with facilitator address as spender
+4. **Submit for Verification**: Client submits signed payload to `POST /verify`
+5. **Submit for Settlement**: Authenticated backend calls `POST /settle`
+
+### Example Client Code
+
+```typescript
+const facilitatorUrl = process.env.NEXT_PUBLIC_FACILITATOR_URL;
+
+// Step 1: Fetch requirements (no facilitator address needed)
+const requirements = await fetch(`${facilitatorUrl}/requirements`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    amount: '2500000',
+    memo: 'Order #123',
+    extra: { merchantAddress: '0xMERCH...' }
+  })
+}).then(r => r.json());
+
+// Step 2: Create EIP-3009 permit using requirements.recipient (facilitator address)
+const permit = await createPermit({
+  owner: userAddress,
+  spender: requirements.recipient, // Facilitator address injected here
+  value: requirements.amount,
+  deadline: requirements.deadline,
+  nonce: requirements.nonce,
+});
+
+// Step 3: Verify
+const verification = await fetch(`${facilitatorUrl}/verify`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ ...requirements, permit })
+}).then(r => r.json());
+
+// Step 4: Settle (via backend with merchant API key)
+```
+
 ## Merchant Integration
 
 ### Registration
@@ -466,7 +597,7 @@ const response = await fetch('https://facilitator.example.com/settle', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'X-API-Key': 'your-merchant-api-key',
+    'X-API-Key': 'your_merchant_api_key_here',  // Placeholder - use your actual API key
   },
   body: JSON.stringify({
     paymentPayload,
