@@ -1,53 +1,15 @@
 'use client';
 
-const containerStyle: React.CSSProperties = {
-  maxWidth: '900px',
-  margin: '40px auto',
-};
-
-const headerTextStyle: React.CSSProperties = {
-  fontSize: '36px',
-  marginBottom: '10px',
-  color: '#28A0F0',
-};
-
-const subTextStyle: React.CSSProperties = {
-  fontSize: '16px',
-  color: '#8b949e',
-  marginBottom: '20px',
-};
-
-const sectionStyle: React.CSSProperties = {
-  marginTop: '30px',
-};
-
-const sectionHeadingStyle: React.CSSProperties = {
-  color: '#e6edf3',
-  fontSize: '20px',
-  marginBottom: '12px',
-};
-
-const paragraphStyle: React.CSSProperties = {
-  color: '#8b949e',
-  lineHeight: 1.7,
-  marginBottom: '12px',
-};
-
-const highlightBoxStyle: React.CSSProperties = {
-  background: '#0d2438',
-  border: '1px solid #2d3e54',
-  borderRadius: '6px',
-  padding: '15px 20px',
-  marginTop: '20px',
-  color: '#8b949e',
-  lineHeight: 1.7,
-};
-
-const listStyle: React.CSSProperties = {
-  marginLeft: '20px',
-  color: '#8b949e',
-  lineHeight: 1.7,
-};
+import {
+  containerStyle,
+  headerTextStyle,
+  highlightBoxStyle,
+  listStyle,
+  paragraphStyle,
+  sectionHeadingStyle,
+  sectionStyle,
+  subTextStyle,
+} from '../components/LegalPageStyles';
 
 const lastUpdated = 'November 6, 2025';
 
