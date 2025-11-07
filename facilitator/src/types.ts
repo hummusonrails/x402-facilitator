@@ -207,7 +207,7 @@ export interface PaymentRequirementsAccepts {
   payTo: string;
   resource: string;
   description: string;
-  mimeType?: string;
+  mimeType: string; // Required per x402 validation
   outputSchema?: object;
   maxTimeoutSeconds: number;
   extra?: {
@@ -221,6 +221,27 @@ export interface PaymentRequirementsResponse {
   error: string;
   accepts: PaymentRequirementsAccepts[];
 }
+
+// Zod schema for PaymentRequirementsResponse validation
+export const PaymentRequirementsAcceptsSchema = z.object({
+  scheme: z.string(),
+  network: z.enum(['arbitrum', 'arbitrum-sepolia', 'base', 'base-sepolia', 'avalanche', 'avalanche-fuji', 'ethereum', 'ethereum-sepolia']),
+  maxAmountRequired: z.string(),
+  asset: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  payTo: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  resource: z.string().url(),
+  description: z.string(),
+  mimeType: z.string(),
+  outputSchema: z.object({}).passthrough().optional(),
+  maxTimeoutSeconds: z.number(),
+  extra: z.object({}).passthrough().optional(),
+});
+
+export const PaymentRequirementsResponseSchema = z.object({
+  x402Version: z.literal(1),
+  error: z.string(),
+  accepts: z.array(PaymentRequirementsAcceptsSchema),
+});
 
 export type { SDKPaymentRequirements, SDKPaymentPayload };
 
