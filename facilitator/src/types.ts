@@ -198,6 +198,30 @@ export interface RequirementsRequest {
   };
 }
 
+// X402 PaymentRequirements format (for accepts array)
+export interface PaymentRequirementsAccepts {
+  scheme: string;
+  network: string;
+  maxAmountRequired: string;
+  asset: string;
+  payTo: string;
+  resource: string;
+  description: string;
+  mimeType?: string;
+  outputSchema?: object;
+  maxTimeoutSeconds: number;
+  extra?: {
+    [key: string]: any;
+  };
+}
+
+// X402 PaymentRequirementsResponse format
+export interface PaymentRequirementsResponse {
+  x402Version: number;
+  error: string;
+  accepts: PaymentRequirementsAccepts[];
+}
+
 export type { SDKPaymentRequirements, SDKPaymentPayload };
 
 export const SDKVerifyRequestSchema = z.object({

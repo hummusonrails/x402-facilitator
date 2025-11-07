@@ -114,7 +114,7 @@ app.get('/requirements', (req: Request, res: Response) => {
   logger.info('GET /requirements');
   
   const requirements = generateRequirements({});
-  res.json(requirements);
+  res.status(402).json(requirements);
 });
 
 app.post('/requirements', (req: Request, res: Response) => {
@@ -124,7 +124,7 @@ app.post('/requirements', (req: Request, res: Response) => {
   try {
     const request: RequirementsRequest = req.body;
     const requirements = generateRequirements(request);
-    res.json(requirements);
+    res.status(402).json(requirements);
   } catch (error: any) {
     logger.error('Requirements generation error', { error: error.message });
     res.status(500).json({
