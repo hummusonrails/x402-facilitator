@@ -30,6 +30,7 @@ import {
 const app = express();
 
 app.use(express.json({ limit: BODY_SIZE_LIMIT }));
+app.use(express.static('public'));
 
 app.use((req: Request, res: Response, next: NextFunction) => {
   const correlationId = generateCorrelationId();
@@ -85,6 +86,81 @@ if (isDatabaseConfigured()) {
 } else {
   console.log('Registered Merchants: Database not configured');
 }
+
+app.get('/', (req: Request, res: Response) => {
+  const facilitatorUrl = process.env.FACILITATOR_URL || `http://localhost:${PORT}`;
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>X402 Facilitator - Arbitrum</title>
+  
+  <!-- OG Metadata -->
+  <meta property="og:title" content="X402 Facilitator for Arbitrum">
+  <meta property="og:description" content="X402 payment facilitator for Arbitrum networks. Supports gasless USDC transfers with EIP-3009.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="${facilitatorUrl}">
+  <meta property="og:image" content="${facilitatorUrl}/og-image.png">
+  
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="X402 Facilitator for Arbitrum">
+  <meta name="twitter:description" content="X402 payment facilitator for Arbitrum networks.">
+  <meta name="twitter:image" content="${facilitatorUrl}/og-image.png">
+  
+  <!-- Favicon -->
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  
+  <style>
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+      max-width: 800px; 
+      margin: 50px auto; 
+      padding: 20px;
+      line-height: 1.6;
+    }
+    h1 { color: #2563eb; }
+    .endpoint { 
+      background: #f3f4f6; 
+      padding: 10px; 
+      margin: 10px 0; 
+      border-radius: 5px;
+      font-family: monospace;
+    }
+    .network { color: #059669; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>X402 Facilitator for Arbitrum</h1>
+  <p>Production-ready payment settlement service supporting the X402 protocol.</p>
+  <p>Caution: This is an unvetted service. Use at your own risk.</p>
+  
+  <h2>Configuration</h2>
+  <ul>
+    <li><strong>Network:</strong> <span class="network">${config.network}</span></li>
+    <li><strong>Chain ID:</strong> ${config.chainId}</li>
+    <li><strong>USDC Address:</strong> <code>${config.usdcAddress}</code></li>
+    <li><strong>Facilitator Address:</strong> <code>${facilitatorAddress}</code></li>
+  </ul>
+  
+  <h2>API Endpoints</h2>
+  <div class="endpoint">GET /health</div>
+  <div class="endpoint">GET /supported</div>
+  <div class="endpoint">GET /requirements</div>
+  <div class="endpoint">POST /requirements</div>
+  <div class="endpoint">POST /verify</div>
+  <div class="endpoint">POST /settle</div>
+  
+  <h2>Documentation</h2>
+  <p>For integration details, visit the <a href="https://github.com/hummusonrails/x402-facilitator" target="_blank">X402 Arbitrum Facilitator Documentation</a>.</p>
+</body>
+</html>
+  `;
+  res.setHeader('Content-Type', 'text/html');
+  res.send(html);
+});
 
 app.get('/health', (req: Request, res: Response) => {
   const health = getHealth();
