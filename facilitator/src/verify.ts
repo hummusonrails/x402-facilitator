@@ -164,7 +164,7 @@ export async function verifyPayment(
   const totalMinusGas = totalAmount - GAS_FEE_USDC;
   const feeMultiplier = 10000n + BigInt(SERVICE_FEE_BPS);
   const merchantAmount = (totalMinusGas * 10000n) / feeMultiplier;
-  const serviceFee = (merchantAmount * BigInt(SERVICE_FEE_BPS)) / 10000n;
+  const serviceFee = totalMinusGas - merchantAmount; // Use residual to ensure totals reconcile
   const feeAmount = serviceFee + GAS_FEE_USDC;
   
   if (useDatabase) {
