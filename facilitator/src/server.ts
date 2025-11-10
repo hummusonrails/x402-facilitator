@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
+import { createPublicClient, http, Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { config, FACILITATOR_PRIVATE_KEY, FACILITATOR_ADDRESS, PORT, BODY_SIZE_LIMIT, RECOVERY_INTERVAL_MS, allNetworkConfigs, Network } from './config.js';
 import { verifyPayment } from './verify.js';
@@ -66,6 +67,12 @@ const adminLimiter = rateLimit({
 app.use(generalLimiter);
 
 const facilitatorAddress = FACILITATOR_ADDRESS;
+
+// Create a public client
+const publicClient = createPublicClient({
+  chain: config.chain,
+  transport: http(config.rpcUrl),
+});
 
 console.log('='.repeat(60));
 console.log('X402 Facilitator for Arbitrum');
@@ -432,6 +439,53 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
   }
 });
 
+app.get('/admin/wallet', adminLimiter, authenticateAdmin, async (req: Request, res: Response) => {
+  const logger = (req as any).logger;
+  
+  try {
+    logger.info('GET /admin/wallet');
+
+    // ERC-20 balanceOf ABI
+    const balanceOfAbi = [{
+      name: 'balanceOf',
+      type: 'function',
+      stateMutability: 'view',
+      inputs: [{ name: 'account', type: 'address' }],
+      outputs: [{ name: '', type: 'uint256' }],
+    }] as const;
+
+    // Fetch both USDC and ETH balances in parallel
+    const [usdcBalance, ethBalance] = await Promise.all([
+      publicClient.readContract({
+        address: config.usdcAddress as Address,
+        abi: balanceOfAbi,
+        functionName: 'balanceOf',
+        args: [facilitatorAddress],
+      }),
+      publicClient.getBalance({
+        address: facilitatorAddress,
+      }),
+    ]);
+
+    logger.info('Wallet balances retrieved', { 
+      address: facilitatorAddress,
+      usdcBalance: usdcBalance.toString(),
+      ethBalance: ethBalance.toString(),
+    });
+
+    res.json({
+      balance: usdcBalance.toString(),
+      ethBalance: ethBalance.toString(),
+      address: facilitatorAddress,
+    });
+  } catch (error: any) {
+    logger.error('Wallet endpoint error', { error: error.message });
+    res.status(500).json({
+      error: 'Internal server error',
+    });
+  }
+});
+
 app.post('/admin/refund', adminLimiter, authenticateAdmin, async (req: Request, res: Response) => {
   const logger = (req as any).logger;
   
@@ -509,6 +563,7 @@ async function startServer() {
       console.log('');
       console.log('Authenticated Endpoints:');
       console.log(`  POST http://localhost:${PORT}/settle          - Execute payment settlement (merchant)`);
+      console.log(`  GET  http://localhost:${PORT}/admin/wallet    - Get facilitator wallet balance (admin)`);
       console.log(`  POST http://localhost:${PORT}/admin/refund    - Execute refund (admin)`);
       console.log('');
     });

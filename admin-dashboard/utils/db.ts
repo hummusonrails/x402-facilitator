@@ -12,6 +12,8 @@ export async function getPayments(limit = 50, offset = 0) {
        '0x' || encode(user_address, 'hex') as user_address,
        '0x' || encode(merchant_address, 'hex') as merchant_address,
        total_amount,
+       merchant_amount,
+       fee_amount,
        status,
        '0x' || encode(incoming_tx_hash, 'hex') as incoming_tx_hash,
        '0x' || encode(outgoing_tx_hash, 'hex') as outgoing_tx_hash,
@@ -49,9 +51,20 @@ export async function getStats() {
     `SELECT 
        status,
        COUNT(*) as count,
-       SUM(total_amount) as total_volume
+       SUM(total_amount) as total_volume,
+       COALESCE(SUM(fee_amount), 0) as total_fees
      FROM payments
      GROUP BY status`
   );
   return rows;
+}
+
+export async function getTotalFees() {
+  const { rows } = await pool.query(
+    `SELECT 
+       COALESCE(SUM(fee_amount), 0) as total_fees
+     FROM payments
+     WHERE status = 'complete'`
+  );
+  return rows[0]?.total_fees || '0';
 }

@@ -158,7 +158,16 @@ POSTGRES_PORT=5432
 #### Run Migrations
 
 ```bash
+# Initial schema
 psql "$DATABASE_URL" -f facilitator/migrations/001_init.sql
+
+# Merchant management (if using merchant features)
+psql "$DATABASE_URL" -f facilitator/migrations/002_merchants.sql
+psql "$DATABASE_URL" -f facilitator/migrations/003_merchant_approval.sql
+psql "$DATABASE_URL" -f facilitator/migrations/004_merchant_contact_info.sql
+
+# Fee tracking (required for admin dashboard)
+psql "$DATABASE_URL" -f facilitator/migrations/005_add_fee_columns.sql
 ```
 
 ## Database Schema
@@ -175,6 +184,8 @@ Tracks payment state through the settlement flow.
 | `token_address` | bytea | USDC contract address |
 | `network` | text | Network (arbitrum, arbitrum-sepolia) |
 | `total_amount` | numeric(78,0) | Total amount in base units |
+| `merchant_amount` | numeric(78,0) | Amount merchant receives (excluding fees) |
+| `fee_amount` | numeric(78,0) | Facilitator's fee (service + gas) |
 | `incoming_tx_hash` | bytea | User → Facilitator tx hash |
 | `outgoing_tx_hash` | bytea | Facilitator → Merchant tx hash |
 | `status` | text | State machine status |

@@ -8,6 +8,8 @@ interface Payment {
   user_address: string;
   merchant_address: string;
   total_amount: string;
+  merchant_amount: string;
+  fee_amount: string;
   status: string;
   incoming_tx_hash: string | null;
   outgoing_tx_hash: string | null;
@@ -18,12 +20,20 @@ interface Stats {
   status: string;
   count: string;
   total_volume: string;
+  total_fees: string;
+}
+
+interface WalletInfo {
+  balance: string;
+  ethBalance: string;
+  address: string;
 }
 
 export default function Dashboard() {
   const router = useRouter();
   const [payments, setPayments] = useState<Payment[]>([]);
   const [stats, setStats] = useState<Stats[]>([]);
+  const [walletInfo, setWalletInfo] = useState<WalletInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [refundNonce, setRefundNonce] = useState('');
   const [refundReason, setRefundReason] = useState('');
@@ -34,9 +44,10 @@ export default function Dashboard() {
 
   async function loadData() {
     try {
-      const [paymentsRes, statsRes] = await Promise.all([
+      const [paymentsRes, statsRes, walletRes] = await Promise.all([
         fetch('/api/payments'),
         fetch('/api/stats'),
+        fetch('/api/wallet'),
       ]);
 
       if (!paymentsRes.ok || !statsRes.ok) {
@@ -49,6 +60,11 @@ export default function Dashboard() {
 
       setPayments(paymentsData);
       setStats(statsData);
+
+      if (walletRes.ok) {
+        const walletData = await walletRes.json();
+        setWalletInfo(walletData);
+      }
     } catch (error) {
       console.error('Failed to load data:', error);
     } finally {
@@ -93,6 +109,7 @@ export default function Dashboard() {
   const totalPayments = stats.reduce((sum, s) => sum + parseInt(s.count), 0);
   const completePayments = stats.find(s => s.status === 'complete');
   const failedPayments = stats.find(s => s.status === 'failed');
+  const totalFeesEarned = completePayments?.total_fees || '0';
 
   return (
     <div className="container">
@@ -108,7 +125,30 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Wallet Balance Section */}
+      <div className="wallet-balance-row">
+        <div className="wallet-balance-card">
+          <h3>USDC Balance</h3>
+          <div className="value">
+            {walletInfo ? (parseInt(walletInfo.balance) / 1e6).toFixed(2) : '0.00'} USDC
+          </div>
+        </div>
+        <div className="wallet-balance-card">
+          <h3>ETH Balance</h3>
+          <div className="value">
+            {walletInfo ? (parseInt(walletInfo.ethBalance) / 1e18).toFixed(4) : '0.0000'} ETH
+          </div>
+        </div>
+      </div>
+
+      {/* Stats Grid */}
       <div className="stats">
+        <div className="stat-card">
+          <h3>Total Fees Earned</h3>
+          <div className="value">
+            {(parseInt(totalFeesEarned) / 1e6).toFixed(2)} USDC
+          </div>
+        </div>
         <div className="stat-card">
           <h3>Total Payments</h3>
           <div className="value">{totalPayments}</div>
@@ -166,6 +206,7 @@ export default function Dashboard() {
               <th>Nonce</th>
               <th>Merchant</th>
               <th>Amount</th>
+              <th>Fee Earned</th>
               <th>Status</th>
               <th>Created</th>
             </tr>
@@ -176,6 +217,9 @@ export default function Dashboard() {
                 <td className="mono">{payment.nonce.slice(0, 10)}...</td>
                 <td className="mono">{payment.merchant_address.slice(0, 10)}...</td>
                 <td>{(parseInt(payment.total_amount) / 1e6).toFixed(2)} USDC</td>
+                <td style={{ color: '#28A0F0', fontWeight: 'bold' }}>
+                  {(parseInt(payment.fee_amount || '0') / 1e6).toFixed(2)} USDC
+                </td>
                 <td>
                   <span className={`status status-${payment.status}`}>
                     {payment.status}

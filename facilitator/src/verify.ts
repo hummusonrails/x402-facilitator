@@ -1,5 +1,5 @@
 import { Address } from 'viem';
-import { config, USDC_NAME, USDC_VERSION } from './config.js';
+import { config, USDC_NAME, USDC_VERSION, SERVICE_FEE_BPS, GAS_FEE_USDC } from './config.js';
 import { verifyTransferAuthorization } from './eip3009.js';
 import { createIfAbsent } from './nonceStore.js';
 import { isDatabaseConfigured } from './db.js';
@@ -146,6 +146,27 @@ export async function verifyPayment(
 
   const nonce = paymentPayload.payload.nonce;
   
+  // Calculate fee breakdown
+  const totalAmount = BigInt(paymentRequirements.amount);
+  
+  // Guard against underflow: total must be at least gas fee
+  if (totalAmount < GAS_FEE_USDC) {
+    logger.error('Amount less than gas fee', {
+      totalAmount: totalAmount.toString(),
+      gasFee: GAS_FEE_USDC.toString(),
+    });
+    return {
+      valid: false,
+      invalidReason: `Amount ${totalAmount} is less than fixed gas fee ${GAS_FEE_USDC}`,
+    };
+  }
+  
+  const totalMinusGas = totalAmount - GAS_FEE_USDC;
+  const feeMultiplier = 10000n + BigInt(SERVICE_FEE_BPS);
+  const merchantAmount = (totalMinusGas * 10000n) / feeMultiplier;
+  const serviceFee = totalMinusGas - merchantAmount; // Use residual to ensure totals reconcile
+  const feeAmount = serviceFee + GAS_FEE_USDC;
+  
   if (useDatabase) {
     // Use persistent database storage
     try {
@@ -155,7 +176,9 @@ export async function verifyPayment(
         merchantAddress,
         tokenAddress: config.usdcAddress as `0x${string}`,
         network: config.network,
-        totalAmount: BigInt(paymentRequirements.amount),
+        totalAmount,
+        merchantAmount,
+        feeAmount,
       });
       
       if (result === 'exists') {
