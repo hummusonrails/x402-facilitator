@@ -68,6 +68,12 @@ app.use(generalLimiter);
 
 const facilitatorAddress = FACILITATOR_ADDRESS;
 
+// Create a public client
+const publicClient = createPublicClient({
+  chain: config.chain,
+  transport: http(config.rpcUrl),
+});
+
 console.log('='.repeat(60));
 console.log('X402 Facilitator for Arbitrum');
 console.log('='.repeat(60));
@@ -438,12 +444,6 @@ app.get('/admin/wallet', adminLimiter, authenticateAdmin, async (req: Request, r
   
   try {
     logger.info('GET /admin/wallet');
-
-    // Create a public client to query the blockchain
-    const publicClient = createPublicClient({
-      chain: config.chain,
-      transport: http(config.rpcUrl),
-    });
 
     // ERC-20 balanceOf ABI
     const balanceOfAbi = [{
