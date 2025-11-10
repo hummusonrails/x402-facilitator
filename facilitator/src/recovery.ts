@@ -41,10 +41,8 @@ async function retryOutgoingTransfer(
     outputs: [{ name: '', type: 'bool' }],
   }] as const;
 
-  const totalAmount = BigInt(payment.totalAmount);
-  const serviceFee = (totalAmount * 50n) / 10000n;
-  const gasFee = 100000n;
-  const merchantAmount = totalAmount - serviceFee - gasFee;
+  // Use the merchant amount stored in the database
+  const merchantAmount = BigInt(payment.merchantAmount);
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {

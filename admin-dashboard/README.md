@@ -4,8 +4,9 @@ Simple web-based admin dashboard for managing the X402 payment facilitator.
 
 ## Features
 
+- **View facilitator wallet balance** (USDC and ETH)
 - View payment statistics (total, completed, failed)
-- Browse recent payments
+- **Browse recent payments with fee breakdown**
 - Execute refunds for failed payments
 - **Manage merchants** (add, enable/disable)
 - **Generate merchant API keys** directly in the UI
@@ -57,6 +58,15 @@ Dashboard will be available at `http://localhost:3003`
 2. Enter admin credentials
 3. You'll be redirected to the dashboard
 
+### View Wallet Balance
+
+The dashboard displays:
+- **USDC Balance**: Current USDC balance in the facilitator wallet
+- **ETH Balance**: Current ETH balance for gas fees
+- **Wallet Address**: Facilitator's Ethereum address
+
+Balances are updated automatically every 30 seconds.
+
 ### View Payments
 
 The dashboard shows:
@@ -68,7 +78,9 @@ The dashboard shows:
 Recent payments table displays:
 - Nonce (truncated)
 - Merchant address (truncated)
-- Amount in USDC
+- Total amount in USDC
+- Merchant amount (what merchant receives)
+- Fee amount (facilitator's fee)
 - Status
 - Creation timestamp
 

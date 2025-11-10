@@ -106,7 +106,13 @@ Verifies and executes onchain settlement.
   "success": true,
   "transactionHash": "0x...",
   "blockNumber": 12345678,
-  "status": "confirmed"
+  "status": "confirmed",
+  "feeBreakdown": {
+    "merchantAmount": "1000000",
+    "serviceFee": "5000",
+    "gasFee": "100000",
+    "totalAmount": "1105000"
+  }
 }
 ```
 
@@ -117,6 +123,23 @@ Or on error:
   "error": "Settlement failed: insufficient allowance"
 }
 ```
+
+### `GET /admin/wallet` (Admin Only)
+Returns facilitator wallet balance and address.
+
+**Authentication:** Requires `X-Admin-Key` header
+
+**Response:**
+```json
+{
+  "balance": "1234567890",
+  "ethBalance": "500000000000000000",
+  "address": "0x0000000000000000000000000000000000000000"
+}
+```
+
+- `balance`: USDC balance in base units (6 decimals)
+- `ethBalance`: ETH balance in wei (18 decimals)
 
 ## Setup
 

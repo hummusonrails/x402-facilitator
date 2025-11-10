@@ -22,6 +22,8 @@ export interface PaymentRecord {
   tokenAddress: string;
   network: string;
   totalAmount: string;
+  merchantAmount: string;
+  feeAmount: string;
   status: PaymentStatus;
   incomingTxHash: string | null;
   outgoingTxHash: string | null;
@@ -32,8 +34,11 @@ export interface PaymentRecord {
 function nonceLockKey(nonce: string): bigint {
   const hash = createHash('sha256').update(nonce).digest();
   // PostgreSQL advisory locks use int8 (64-bit signed integer)
-  // Take first 8 bytes and convert to bigint
-  return BigInt('0x' + hash.subarray(0, 8).toString('hex'));
+  // Take first 8 bytes and convert to bigint, ensuring it fits in signed 64-bit range
+  const rawValue = BigInt('0x' + hash.subarray(0, 8).toString('hex'));
+  // Mask to ensure we stay within signed 64-bit range (2^63 - 1)
+  const MAX_INT64 = BigInt('0x7FFFFFFFFFFFFFFF');
+  return rawValue & MAX_INT64;
 }
 
 export async function createIfAbsent(args: {
@@ -43,6 +48,8 @@ export async function createIfAbsent(args: {
   tokenAddress: `0x${string}`;
   network: string;
   totalAmount: bigint;
+  merchantAmount: bigint;
+  feeAmount: bigint;
 }): Promise<'created' | 'exists'> {
   return withTx(async (client) => {
     const lockKey = nonceLockKey(args.nonce);
@@ -62,9 +69,9 @@ export async function createIfAbsent(args: {
     
     await client.query(
       `INSERT INTO payments 
-       (nonce, user_address, merchant_address, token_address, network, total_amount, status)
+       (nonce, user_address, merchant_address, token_address, network, total_amount, merchant_amount, fee_amount, status)
        VALUES ($1, decode(substr($2, 3), 'hex'), decode(substr($3, 3), 'hex'),
-               decode(substr($4, 3), 'hex'), $5, $6, 'pending')`,
+               decode(substr($4, 3), 'hex'), $5, $6, $7, $8, 'pending')`,
       [
         args.nonce,
         args.userAddress,
@@ -72,6 +79,8 @@ export async function createIfAbsent(args: {
         args.tokenAddress,
         args.network,
         args.totalAmount.toString(),
+        args.merchantAmount.toString(),
+        args.feeAmount.toString(),
       ]
     );
     
@@ -138,6 +147,8 @@ export async function getPayment(nonce: string): Promise<PaymentRecord | null> {
        '0x' || encode(token_address, 'hex') as token_address,
        network,
        total_amount,
+       merchant_amount,
+       fee_amount,
        status,
        CASE WHEN incoming_tx_hash IS NOT NULL 
          THEN '0x' || encode(incoming_tx_hash, 'hex') 
@@ -166,6 +177,8 @@ export async function getPayment(nonce: string): Promise<PaymentRecord | null> {
     tokenAddress: row.token_address,
     network: row.network,
     totalAmount: row.total_amount,
+    merchantAmount: row.merchant_amount,
+    feeAmount: row.fee_amount,
     status: row.status as PaymentStatus,
     incomingTxHash: row.incoming_tx_hash,
     outgoingTxHash: row.outgoing_tx_hash,
@@ -183,6 +196,8 @@ export async function getIncompletePayments(): Promise<PaymentRecord[]> {
        '0x' || encode(token_address, 'hex') as token_address,
        network,
        total_amount,
+       merchant_amount,
+       fee_amount,
        status,
        CASE WHEN incoming_tx_hash IS NOT NULL 
          THEN '0x' || encode(incoming_tx_hash, 'hex') 
@@ -206,6 +221,8 @@ export async function getIncompletePayments(): Promise<PaymentRecord[]> {
     tokenAddress: row.token_address,
     network: row.network,
     totalAmount: row.total_amount,
+    merchantAmount: row.merchant_amount,
+    feeAmount: row.fee_amount,
     status: row.status as PaymentStatus,
     incomingTxHash: row.incoming_tx_hash,
     outgoingTxHash: row.outgoing_tx_hash,
