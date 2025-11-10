@@ -148,6 +148,19 @@ export async function verifyPayment(
   
   // Calculate fee breakdown
   const totalAmount = BigInt(paymentRequirements.amount);
+  
+  // Guard against underflow: total must be at least gas fee
+  if (totalAmount < GAS_FEE_USDC) {
+    logger.error('Amount less than gas fee', {
+      totalAmount: totalAmount.toString(),
+      gasFee: GAS_FEE_USDC.toString(),
+    });
+    return {
+      valid: false,
+      invalidReason: `Amount ${totalAmount} is less than fixed gas fee ${GAS_FEE_USDC}`,
+    };
+  }
+  
   const totalMinusGas = totalAmount - GAS_FEE_USDC;
   const feeMultiplier = 10000n + BigInt(SERVICE_FEE_BPS);
   const merchantAmount = (totalMinusGas * 10000n) / feeMultiplier;
