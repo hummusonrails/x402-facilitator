@@ -1,5 +1,5 @@
 import { randomBytes } from 'crypto';
-import { config, FACILITATOR_ADDRESS, SERVICE_FEE_BPS, GAS_FEE_USDC } from './config.js';
+import { config, FACILITATOR_ADDRESS, SERVICE_FEE_BPS, GAS_FEE_USDC, toLegacyNetworkId } from './config.js';
 import type { RequirementsRequest, PaymentRequirementsResponse, PaymentRequirementsAccepts } from './types.js';
 
 function generateNonce(): string {
@@ -11,7 +11,9 @@ function calculateDeadline(seconds: number = 3600): number {
 }
 
 export function generateRequirements(request: RequirementsRequest): PaymentRequirementsResponse {
-  const network = config.network; // Use network directly from config
+  const requestedVersion = request.x402Version ?? request.version ?? request.extra?.x402Version;
+  const version = requestedVersion === 1 ? 1 : 2;
+  const network = version === 1 ? toLegacyNetworkId(config.network) : config.network;
   const token = config.usdcAddress;
   const recipient = FACILITATOR_ADDRESS;
   const nonce = generateNonce();
@@ -23,7 +25,6 @@ export function generateRequirements(request: RequirementsRequest): PaymentRequi
   const resource = request.extra?.resource || process.env.FACILITATOR_URL || 'http://localhost:3002/resource';
   const description = request.extra?.description || memo || 'Payment required for resource access';
 
-  // Build the accepts object per X402 spec
   const acceptsItem: PaymentRequirementsAccepts = {
     scheme: 'exact',
     network,
@@ -32,7 +33,7 @@ export function generateRequirements(request: RequirementsRequest): PaymentRequi
     payTo: recipient,
     resource,
     description,
-    mimeType: request.extra?.mimeType || 'application/json', // Provide default mimeType
+    mimeType: request.extra?.mimeType || 'application/json',
     outputSchema: request.extra?.outputSchema,
     maxTimeoutSeconds: 3600,
     extra: {
@@ -49,9 +50,8 @@ export function generateRequirements(request: RequirementsRequest): PaymentRequi
     }
   };
 
-  // Return PaymentRequirementsResponse per X402 spec
   const response: PaymentRequirementsResponse = {
-    x402Version: 1,
+    x402Version: version,
     error: 'Payment required',
     accepts: [acceptsItem]
   };

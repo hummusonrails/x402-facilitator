@@ -16,7 +16,7 @@ This facilitator enables merchants to accept USDC payments on Arbitrum using the
 - Strict validation of network, token, recipient, amount, and timing
 
 **SDK Compatibility**
-- Wire-level compatibility with [x402 SDK](https://www.npmjs.com/package/@coinbase/x402) schemas
+- Wire-level compatibility with [x402 SDK](https://www.npmjs.com/package/@x402/core) schemas
 - Server-side fee model enforcement
 - Dynamic requirements generation via `/requirements` endpoints
 
@@ -74,8 +74,8 @@ cp .env.example .env
 Edit `.env` with your configuration:
 
 ```env
-# Network
-NETWORK=arbitrum-sepolia
+# Network (CAIP-2: eip155:421614 or eip155:42161; legacy names still accepted)
+NETWORK=eip155:421614
 
 # Database (REQUIRED for production)
 POSTGRES_USER=facilitator
@@ -155,7 +155,7 @@ Health check with network information.
 ```json
 {
   "status": "ok",
-  "network": "arbitrum-sepolia",
+  "network": "eip155:421614",
   "chainId": 421614,
   "timestamp": 1699000000000
 }
@@ -168,39 +168,50 @@ Returns supported payment kinds.
 ```json
 {
   "kinds": [
-    {
-      "x402Version": 1,
-      "scheme": "exact",
-      "network": "arbitrum"
-    },
-    {
-      "x402Version": 1,
-      "scheme": "exact",
-      "network": "arbitrum-sepolia"
-    }
-  ]
+    { "x402Version": 1, "scheme": "exact", "network": "arbitrum" },
+    { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:42161", "payTo": "0x..." },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:421614", "payTo": "0x..." }
+  ],
+  "versions": {
+    "1": { "kinds": [{ "x402Version": 1, "scheme": "exact", "network": "arbitrum" }, { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" }] },
+    "2": { "kinds": [{ "x402Version": 2, "scheme": "exact", "network": "eip155:42161", "payTo": "0x..." }, { "x402Version": 2, "scheme": "exact", "network": "eip155:421614", "payTo": "0x..." }] }
+  },
+  "signingAddresses": {
+    "settlement": "0x..."
+  }
 }
 ```
 
 **`GET /requirements`**
 
-Returns default payment requirements with facilitator address.
+Returns default payment requirements with facilitator address. Requirements are also included in the `PAYMENT-RESPONSE` header (mirrored to `X-PAYMENT-RESPONSE`).
 
 Response:
 ```json
 {
-  "network": "arbitrum-sepolia",
-  "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-  "recipient": "0xFACILITATOR_ADDRESS",  // Placeholder - actual facilitator address
-  "amount": "1000000",
-  "nonce": "0xEXAMPLE1234567890abcdef",  // Example nonce - unique per request
-  "deadline": 1731024000,
-  "memo": "",
-  "extra": {
-    "feeMode": "facilitator_split",
-    "feeBps": 50,
-    "gasBufferWei": "100000"
-  }
+  "x402Version": 2,
+  "error": "Payment required",
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:421614",
+      "maxAmountRequired": "1000000",
+      "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+      "payTo": "0xFACILITATOR_ADDRESS",
+      "resource": "http://localhost:3002/resource",
+      "description": "Payment required for resource access",
+      "mimeType": "application/json",
+      "maxTimeoutSeconds": 3600,
+      "extra": {
+        "feeMode": "facilitator_split",
+        "feeBps": 50,
+        "gasBufferWei": "100000",
+        "nonce": "0xEXAMPLE1234567890abcdef",
+        "deadline": 1731024000
+      }
+    }
+  ]
 }
 ```
 
@@ -222,19 +233,29 @@ Request:
 Response:
 ```json
 {
-  "network": "arbitrum",
-  "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-  "recipient": "0xFACILITATOR_ADDRESS",  // Placeholder - actual facilitator address
-  "amount": "2500000",
-  "nonce": "0xEXAMPLE9876543210fedcba",  // Example nonce - unique per request
-  "deadline": 1731024000,
-  "memo": "Order #A1234",
-  "extra": {
-    "feeMode": "facilitator_split",
-    "merchantAddress": "0xMERCHANTADDRESS1234567890abcdef",  // Placeholder merchant address
-    "feeBps": 120,
-    "gasBufferWei": "150000"
-  }
+  "x402Version": 2,
+  "error": "Payment required",
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:42161",
+      "maxAmountRequired": "2500000",
+      "asset": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+      "payTo": "0xFACILITATOR_ADDRESS",
+      "resource": "http://localhost:3002/resource",
+      "description": "Order #A1234",
+      "mimeType": "application/json",
+      "maxTimeoutSeconds": 3600,
+      "extra": {
+        "feeMode": "facilitator_split",
+        "merchantAddress": "0xMERCHANTADDRESS1234567890abcdef",
+        "feeBps": 120,
+        "gasBufferWei": "150000",
+        "nonce": "0xEXAMPLE9876543210fedcba",
+        "deadline": 1731024000
+      }
+    }
+  ]
 }
 ```
 
@@ -245,7 +266,7 @@ Verifies payment payload without executing settlement. No authentication require
 Request:
 ```json
 {
-  "network": "arbitrum",
+  "network": "eip155:42161",
   "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
   "recipient": "0xFACILITATOR_ADDRESS",  // Must match facilitator address
   "amount": "2500000",

@@ -1,6 +1,6 @@
 # Next.js Integration Example
 
-A full-stack Next.js application with x402 payment integration.
+A full-stack Next.js application with x402 payment integration (CAIP-2 networks, header-based requirements).
 
 ## Features
 
@@ -27,6 +27,8 @@ Edit `.env.local`:
 NEXT_PUBLIC_FACILITATOR_URL=http://localhost:3002
 MERCHANT_API_KEY=your_api_key_here
 MERCHANT_ADDRESS=0xYourMerchantAddress
+# Optional: private key for local testing with @x402 clients
+# NEXT_PUBLIC_EVM_PRIVATE_KEY=0x...
 ```
 
 3. Start development server:
@@ -54,10 +56,10 @@ nextjs-app/
 ## Usage Flow
 
 1. User clicks "Purchase Content"
-2. Client fetches payment requirements from facilitator (POST /requirements)
-3. Facilitator issues requirements with its own address as recipient
+2. Client fetches payment requirements from facilitator (POST /requirements) and reads them from the `PAYMENT-RESPONSE` header (mirrored to `X-PAYMENT-RESPONSE` for legacy tools)
+3. Facilitator issues requirements with its own address as `payTo` and CAIP-2 `network` (e.g., `eip155:421614`)
 4. Client creates EIP-3009 signature using MetaMask
-5. Client sends signed payload to backend API route
+5. Client sends signed payload to backend API route (body or `PAYMENT-SIGNATURE` header)
 6. Backend verifies and settles payment with facilitator
 7. Facilitator receives funds, forwards merchant net amount
 8. Content is unlocked for user
@@ -72,7 +74,7 @@ This example demonstrates x402 integration where:
 
 ## Testing
 
-1. Connect MetaMask to Arbitrum Sepolia
+1. Connect MetaMask to Arbitrum Sepolia (`eip155:421614`)
 2. Get test USDC from faucet
 3. Approve USDC spending
 4. Click payment button

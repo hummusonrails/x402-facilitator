@@ -29,42 +29,57 @@ The x402 payment flow involves three parties:
 
 ## Step-by-Step Implementation
 
-### Step 1: Return 402 with Facilitator URL
+### Step 1: Return 402 with facilitator requirements header
 
-When a user requests a protected resource without payment:
+When a user requests a protected resource without payment, fetch requirements from the facilitator and forward them in the headers:
 
 ```javascript
-app.get('/api/premium-content', (req, res) => {
+app.get('/api/premium-content', async (_req, res) => {
+  const requirementsResponse = await fetch(`${process.env.FACILITATOR_URL}/requirements`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amount: '1000000',
+      extra: {
+        description: 'Premium content access',
+        merchantAddress: process.env.MERCHANT_ADDRESS,
+      },
+    }),
+  });
+
+  const requirements = await requirementsResponse.json();
+  const serialized = JSON.stringify(requirements);
+
+  res.setHeader('PAYMENT-RESPONSE', serialized);
+  res.setHeader('X-PAYMENT-RESPONSE', serialized); // legacy mirror
   res.status(402).json({
     error: 'Payment required',
     facilitatorUrl: process.env.FACILITATOR_URL,
-    amount: '1000000',
-    merchantAddress: process.env.MERCHANT_ADDRESS,
-    description: 'Premium content access',
   });
 });
 ```
 
 ### Step 2: Client Creates EIP-3009 Signature
 
-Note: The client library or wallet handles signature creation. The facilitator provides the network, token, and recipient details. Your merchant app only needs to specify the amount and merchant address.
-
-Example using a hypothetical x402 client library:
+Use the `PAYMENT-RESPONSE` header to populate a V2 client. For Axios:
 
 ```typescript
-import { createPayment } from '@x402/client';
+import { x402Client, wrapAxiosWithPayment } from '@x402/axios';
+import { registerExactEvmScheme } from '@x402/evm/exact/client';
+import { privateKeyToAccount } from 'viem/accounts';
+import axios from 'axios';
 
-async function createPaymentSignature(
-  paymentRequirements: PaymentRequirements
-) {
-  const payment = await createPayment({
-    merchantAddress: paymentRequirements.merchantAddress,
-    amount: paymentRequirements.amount,
-    description: paymentRequirements.description,
-  });
+const signer = privateKeyToAccount(process.env.NEXT_PUBLIC_EVM_PRIVATE_KEY as `0x${string}`);
+const client = new x402Client();
+registerExactEvmScheme(client, { signer });
 
-  return payment;
-}
+const api = wrapAxiosWithPayment(
+  axios.create({ baseURL: '/api' }),
+  client,
+);
+
+// Calling your protected endpoint will trigger payment handling automatically
+await api.get('/api/premium-content');
 ```
 
 ### Step 3: Submit Payment to Your Backend
@@ -89,11 +104,12 @@ async function submitPayment(payment: Payment) {
 
 ### Step 4: Backend Settles with Facilitator
 
-Your server settles the payment (NEVER expose API key to client):
+Your server settles the payment (never expose API key to client). Accept payloads from body or `PAYMENT-SIGNATURE` header:
 
 ```javascript
 app.post('/api/premium-content', async (req, res) => {
-  const { paymentPayload, paymentRequirements } = req.body;
+  const parsed = req.body?.paymentPayload ? req.body : JSON.parse(req.header('PAYMENT-SIGNATURE') || '{}');
+  const { paymentPayload, paymentRequirements } = parsed || {};
 
   try {
     const settlementResponse = await fetch(`${FACILITATOR_URL}/settle`, {

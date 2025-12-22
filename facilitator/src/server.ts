@@ -2,7 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { createPublicClient, http, Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { config, FACILITATOR_PRIVATE_KEY, FACILITATOR_ADDRESS, PORT, BODY_SIZE_LIMIT, RECOVERY_INTERVAL_MS, allNetworkConfigs, Network } from './config.js';
+import { config, FACILITATOR_PRIVATE_KEY, FACILITATOR_ADDRESS, PORT, BODY_SIZE_LIMIT, RECOVERY_INTERVAL_MS, allNetworkConfigs } from './config.js';
 import { verifyPayment } from './verify.js';
 import { settlePayment } from './settle.js';
 import { generateRequirements } from './requirements.js';
@@ -67,6 +67,21 @@ const adminLimiter = rateLimit({
 app.use(generalLimiter);
 
 const facilitatorAddress = FACILITATOR_ADDRESS;
+
+function parseSdkRequestPayload(req: Request) {
+  if (req.body && Object.keys(req.body).length > 0) {
+    return req.body;
+  }
+  const headerValue = req.header('PAYMENT-SIGNATURE') || req.header('X-PAYMENT');
+  if (!headerValue) {
+    return null;
+  }
+  try {
+    return JSON.parse(headerValue);
+  } catch {
+    return null;
+  }
+}
 
 // Create a public client
 const publicClient = createPublicClient({
@@ -178,17 +193,34 @@ app.get('/supported', (req: Request, res: Response) => {
   const logger = (req as any).logger;
   logger.info('GET /supported');
 
-  const kinds: SupportedPaymentKind[] = [];
+  const v1Kinds: SupportedPaymentKind[] = [];
+  const v2Kinds: SupportedPaymentKind[] = [];
 
   Object.values(allNetworkConfigs).forEach((networkConfig) => {
-    kinds.push({
+    v1Kinds.push({
       x402Version: 1,
       scheme: 'exact',
+      network: networkConfig.legacyNetwork,
+    });
+    v2Kinds.push({
+      x402Version: 2,
+      scheme: 'exact',
       network: networkConfig.network,
+      payTo: FACILITATOR_ADDRESS,
     });
   });
 
-  const response: SupportedResponse = { kinds };
+  const response: SupportedResponse = { 
+    kinds: [...v1Kinds, ...v2Kinds],
+    versions: {
+      '1': { kinds: v1Kinds },
+      '2': { kinds: v2Kinds },
+    },
+    signingAddresses: {
+      settlement: FACILITATOR_ADDRESS,
+    },
+    extensions: [],
+  };
   res.json(response);
 });
 
@@ -196,7 +228,11 @@ app.get('/requirements', (req: Request, res: Response) => {
   const logger = (req as any).logger;
   logger.info('GET /requirements');
   
-  const requirements = generateRequirements({});
+  const version = req.query.version ? Number(req.query.version) : undefined;
+  const requirements = generateRequirements({ x402Version: Number.isFinite(version) ? version : undefined });
+  const serialized = JSON.stringify(requirements);
+  res.setHeader('PAYMENT-RESPONSE', serialized);
+  res.setHeader('X-PAYMENT-RESPONSE', serialized);
   res.status(402).json(requirements);
 });
 
@@ -207,6 +243,9 @@ app.post('/requirements', (req: Request, res: Response) => {
   try {
     const request: RequirementsRequest = req.body;
     const requirements = generateRequirements(request);
+    const serialized = JSON.stringify(requirements);
+    res.setHeader('PAYMENT-RESPONSE', serialized);
+    res.setHeader('X-PAYMENT-RESPONSE', serialized);
     res.status(402).json(requirements);
   } catch (error: any) {
     logger.error('Requirements generation error', { error: error.message });
@@ -223,7 +262,16 @@ app.post('/verify', async (req: Request, res: Response) => {
   try {
     logger.info('POST /verify');
 
-    const validation = SDKVerifyRequestSchema.safeParse(req.body);
+    const parsedRequest = parseSdkRequestPayload(req);
+    if (!parsedRequest) {
+      logger.warn('Missing payment payload body or PAYMENT-SIGNATURE header');
+      return res.status(400).json({
+        valid: false,
+        reason: 'Missing payment payload',
+      });
+    }
+
+    const validation = SDKVerifyRequestSchema.safeParse(parsedRequest);
     if (!validation.success) {
       logger.warn('Invalid SDK verify request', { errors: validation.error.errors });
       return res.status(400).json({
@@ -340,7 +388,16 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
   try {
     logger.info('POST /settle', { merchant: authReq.merchant?.address });
 
-    const validation = SDKVerifyRequestSchema.safeParse(req.body);
+    const parsedRequest = parseSdkRequestPayload(req);
+    if (!parsedRequest) {
+      logger.warn('Missing payment payload body or PAYMENT-SIGNATURE header');
+      return res.status(400).json({
+        success: false,
+        error: 'Missing payment payload',
+      });
+    }
+
+    const validation = SDKVerifyRequestSchema.safeParse(parsedRequest);
     if (!validation.success) {
       logger.warn('Invalid SDK settle request', { errors: validation.error.errors });
       return res.status(400).json({

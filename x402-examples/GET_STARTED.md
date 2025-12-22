@@ -2,43 +2,41 @@
 
 This directory contains example integrations with the X402 Facilitator for Arbitrum.
 
-## Integration Overview
+## Overview
 
 The x402 protocol simplifies payment integration:
 
 1. **Client only needs**: `NEXT_PUBLIC_FACILITATOR_URL`
-2. **Facilitator provides**: All payment requirements including its own address
+2. **Facilitator provides**: All payment requirements in the `PAYMENT-RESPONSE` header, including its own address
 3. **Fee model enforced**: Server-side by facilitator, cannot be bypassed
 4. **Simplified setup**: No address management in client configuration
 
 ## Integration Flow
 
 ```
-1. Client → POST /requirements → Facilitator
-   Request: { amount, memo, extra: { merchantAddress } }
-   Response: { network, token, recipient, amount, nonce, deadline, extra }
+1. Client → POST /requirements → Facilitator  
+   Request: { amount, memo, extra: { merchantAddress } }  
+   Response: { x402Version: 2, accepts: [{ scheme, network (CAIP-2), asset, payTo, maxAmountRequired, extra { nonce, deadline, feeMode... } }] } in `PAYMENT-RESPONSE`
 
-2. Client creates EIP-3009 permit
-   Using recipient (facilitator address) from requirements
+2. Client creates EIP-3009 permit using `payTo` and `maxAmountRequired`
 
-3. Client → POST /verify → Facilitator
-   Request: { ...requirements, permit }
-   Response: { valid: true, reason: null }
+3. Client → POST /verify → Facilitator (optional)  
+   Body or `PAYMENT-SIGNATURE` header: { paymentPayload, paymentRequirements }
 
-4. Merchant Backend → POST /settle → Facilitator
-   Request: { ...requirements, permit }
+4. Merchant Backend → POST /settle → Facilitator  
+   Body or `PAYMENT-SIGNATURE` header: { paymentPayload, paymentRequirements }  
    Response: { success: true, txHash, meta }
 ```
 
 ## SDK Compatibility
 
-The facilitator is wire-compatible with Coinbase x402 SDK schemas:
+The facilitator is wire-compatible with the `@x402` SDK schemas:
 - `PaymentRequirements` structure matches SDK expectations
 - `PaymentPayload` with `permit` field follows SDK format
 - Responses include SDK-standard fields (`valid`/`reason`, `success`/`txHash`)
 - Additional data provided in `meta` field for rich integrations
 
-## Quick Start Example
+## Quick Start Code Example
 
 ```typescript
 const facilitatorUrl = process.env.NEXT_PUBLIC_FACILITATOR_URL;

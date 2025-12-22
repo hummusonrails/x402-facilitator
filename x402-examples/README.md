@@ -1,10 +1,10 @@
 # X402 Integration Examples
 
-This directory contains working examples demonstrating x402 payment integration with the Arbitrum facilitator.
+This directory contains working examples demonstrating x402 payment integration with the Arbitrum facilitator using CAIP-2 network IDs and the updated payment headers.
 
 ## Integration Overview
 
-All examples use the x402 protocol where clients only need the facilitator URL (`NEXT_PUBLIC_FACILITATOR_URL` or `FACILITATOR_URL`). The facilitator address is provided dynamically through the `/requirements` endpoint.
+All examples use the x402 protocol where clients only need the facilitator URL (`NEXT_PUBLIC_FACILITATOR_URL` or `FACILITATOR_URL`). The facilitator address is provided dynamically through the `/requirements` endpoint and surfaced in the `PAYMENT-RESPONSE` header.
 
 ## Getting Started
 
@@ -16,7 +16,7 @@ All examples use the x402 protocol where clients only need the facilitator URL (
 
 1. Start the facilitator: `cd ../facilitator && pnpm dev`
 2. Choose an example and follow its README
-3. Configure only the facilitator URL in environment variables
+3. Configure the facilitator URL in environment variables; network IDs should use CAIP-2 (`eip155:421614` for Arbitrum Sepolia, `eip155:42161` for Arbitrum One)
 
 ## Examples
 
@@ -62,7 +62,7 @@ Each example includes:
 ## Prerequisites
 
 - Node.js 18+
-- Arbitrum Sepolia testnet access
+- Arbitrum Sepolia testnet access (`eip155:421614`)
 - USDC on Arbitrum Sepolia (for testing)
 - Merchant account with x402 facilitator
 
@@ -85,7 +85,7 @@ Each example includes:
 4. **Test on Sepolia**
    - Get test USDC
    - Run the example
-   - Make a test payment
+   - Make a test payment using requirements returned in `PAYMENT-RESPONSE`
 
 5. **Deploy to Production**
    - Update to Arbitrum mainnet

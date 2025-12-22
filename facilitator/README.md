@@ -1,15 +1,15 @@
 # X402 Facilitator for Arbitrum
 
-Production-ready x402 payment facilitator service for Arbitrum networks. Supports both Arbitrum One (mainnet) and Arbitrum Sepolia (testnet) with native USDC settlement using EIP-3009 transfer authorizations.
+Production-ready x402 payment facilitator service for Arbitrum networks with CAIP-2 identifiers and native USDC settlement using EIP-3009 transfer authorizations.
 
 ## Features
 
-- **Multi-network support**: Arbitrum One and Arbitrum Sepolia
+- **CAIP-2 network IDs**: Uses `eip155:42161` and `eip155:421614` with legacy aliases accepted
 - **EIP-3009 verification**: Full signature verification for transfer authorizations
 - **Strict validation**: Network, token, recipient, amount, and timing checks
 - **Idempotency**: Nonce tracking to prevent replay attacks
 - **Production-ready**: Structured logging, health checks, error handling
-- **Type-safe**: Full TypeScript implementation with Zod validation
+- **Header-friendly paywall**: Requirements emitted in `PAYMENT-RESPONSE` (and mirrored to `X-PAYMENT-RESPONSE` for older clients)
 
 ## API Endpoints
 
@@ -20,7 +20,7 @@ Health check endpoint.
 ```json
 {
   "status": "ok",
-  "network": "arbitrum-sepolia",
+  "network": "eip155:421614",
   "chainId": 421614,
   "timestamp": 1699000000000
 }
@@ -33,29 +33,65 @@ Returns supported payment kinds.
 ```json
 {
   "kinds": [
+    { "x402Version": 1, "scheme": "exact", "network": "arbitrum" },
+    { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:42161", "payTo": "0x..." },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:421614", "payTo": "0x..." }
+  ],
+  "versions": {
+    "1": { "kinds": [{ "x402Version": 1, "scheme": "exact", "network": "arbitrum" }, { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" }] },
+    "2": { "kinds": [{ "x402Version": 2, "scheme": "exact", "network": "eip155:42161", "payTo": "0x..." }, { "x402Version": 2, "scheme": "exact", "network": "eip155:421614", "payTo": "0x..." }] }
+  },
+  "signingAddresses": {
+    "settlement": "0x..."
+  },
+  "extensions": []
+}
+```
+
+### `GET /requirements` / `POST /requirements`
+Returns payment requirements for the configured network. Defaults to the latest shape; pass `version=1` (query string) or `{"x402Version":1}` in the body for the legacy structure.
+
+**Headers:**
+- `PAYMENT-RESPONSE`: JSON string of the requirements (mirrored to `X-PAYMENT-RESPONSE` for older clients)
+
+**Response body (default):**
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required",
+  "accepts": [
     {
-      "x402Version": 1,
       "scheme": "exact",
-      "network": "arbitrum"
-    },
-    {
-      "x402Version": 1,
-      "scheme": "exact",
-      "network": "arbitrum-sepolia"
+      "network": "eip155:421614",
+      "maxAmountRequired": "1000000",
+      "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+      "payTo": "0x...",
+      "resource": "http://localhost:3002/resource",
+      "description": "Payment required for resource access",
+      "mimeType": "application/json",
+      "maxTimeoutSeconds": 3600,
+      "extra": {
+        "feeMode": "facilitator_split",
+        "feeBps": 50,
+        "gasBufferWei": "100000",
+        "nonce": "0x...",
+        "deadline": 1735689600
+      }
     }
   ]
 }
 ```
 
 ### `POST /verify`
-Verifies a payment payload without executing settlement.
+Verifies a payment payload without executing settlement. The payload can be provided in the request body or as JSON in the `PAYMENT-SIGNATURE` header.
 
 **Request:**
 ```json
 {
   "paymentPayload": {
     "scheme": "exact",
-    "network": "arbitrum-sepolia",
+    "network": "eip155:421614",
     "payload": {
       "from": "0x...",
       "to": "0x...",
@@ -70,7 +106,7 @@ Verifies a payment payload without executing settlement.
   },
   "paymentRequirements": {
     "scheme": "exact",
-    "network": "arbitrum-sepolia",
+    "network": "eip155:421614",
     "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
     "amount": "1000000",
     "recipient": "0x...",
@@ -96,7 +132,7 @@ Or on error:
 ```
 
 ### `POST /settle`
-Verifies and executes onchain settlement.
+Verifies and executes onchain settlement. The payload can be provided in the request body or as JSON in the `PAYMENT-SIGNATURE` header.
 
 **Request:** Same as `/verify`
 
@@ -172,8 +208,8 @@ cp .env.example .env
 Required environment variables:
 
 ```env
-# Network: arbitrum or arbitrum-sepolia
-NETWORK=arbitrum-sepolia
+# Network: eip155:42161 or eip155:421614 (legacy names arbitrum/arbitrum-sepolia still accepted)
+NETWORK=eip155:421614
 
 # Database (REQUIRED for production)
 POSTGRES_USER=facilitator
@@ -218,13 +254,13 @@ docker run -p 3002:3002 --env-file .env x402-facilitator
 ## Network Configuration
 
 ### Arbitrum One (Mainnet)
-- **Network**: `arbitrum`
+- **Network**: `eip155:42161` (alias: `arbitrum`)
 - **Chain ID**: 42161
 - **USDC**: `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` (native USDC)
 - **RPC**: `https://arb1.arbitrum.io/rpc`
 
 ### Arbitrum Sepolia (Testnet)
-- **Network**: `arbitrum-sepolia`
+- **Network**: `eip155:421614` (alias: `arbitrum-sepolia`)
 - **Chain ID**: 421614
 - **USDC**: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` (test USDC)
 - **RPC**: `https://sepolia-rollup.arbitrum.io/rpc`
@@ -273,6 +309,10 @@ pnpm build
 ```bash
 pnpm clean
 ```
+
+## Migration notes
+
+For a summary of changes and guidance for legacy integrations, see `docs/migration-v2.md`.
 
 ## License
 
