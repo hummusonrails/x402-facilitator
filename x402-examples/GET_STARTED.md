@@ -2,7 +2,7 @@
 
 This directory contains example integrations with the X402 Facilitator for Arbitrum.
 
-## Integration Overview
+## Overview
 
 The x402 protocol simplifies payment integration:
 
@@ -36,7 +36,7 @@ The facilitator is wire-compatible with the `@x402` SDK schemas:
 - Responses include SDK-standard fields (`valid`/`reason`, `success`/`txHash`)
 - Additional data provided in `meta` field for rich integrations
 
-## Quick Start Example
+## Quick Start Code Example
 
 ```typescript
 const facilitatorUrl = process.env.NEXT_PUBLIC_FACILITATOR_URL;
