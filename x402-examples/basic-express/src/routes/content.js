@@ -40,8 +40,17 @@ async function fetchRequirements() {
     }),
   });
 
-  const requirements = await response.json();
-  return requirements;
+  if (!response.ok) {
+    let errorBody;
+    try {
+      errorBody = await response.json();
+    } catch {
+      errorBody = await response.text();
+    }
+    throw new Error(`Failed to fetch requirements (${response.status}): ${JSON.stringify(errorBody)}`);
+  }
+
+  return await response.json();
 }
 
 function parsePaymentRequest(req) {
