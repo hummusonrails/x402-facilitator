@@ -2,9 +2,11 @@ const express = require('express');
 const router = express.Router();
 
 const CONTENT_PRICE = '1000000';
+const FACILITATOR_URL = process.env.FACILITATOR_URL;
+const MERCHANT_ADDRESS = process.env.MERCHANT_ADDRESS;
 
 async function settlePayment(paymentPayload, paymentRequirements) {
-  const response = await fetch(`${process.env.FACILITATOR_URL}/settle`, {
+  const response = await fetch(`${FACILITATOR_URL}/settle`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -24,22 +26,58 @@ async function settlePayment(paymentPayload, paymentRequirements) {
   return await response.json();
 }
 
-router.get('/premium-content', (req, res) => {
-  const paymentRequirements = {
-    merchantAddress: process.env.MERCHANT_ADDRESS,
-    amount: CONTENT_PRICE,
-    description: 'Access to premium content',
-  };
+async function fetchRequirements() {
+  const description = 'Access to premium content';
+  const response = await fetch(`${FACILITATOR_URL}/requirements`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amount: CONTENT_PRICE,
+      extra: {
+        description,
+        merchantAddress: MERCHANT_ADDRESS,
+      },
+    }),
+  });
 
-  res.status(402).json({
-    error: 'Payment required',
-    paymentRequirements,
+  const requirements = await response.json();
+  return requirements;
+}
+
+function parsePaymentRequest(req) {
+  if (req.body && Object.keys(req.body).length > 0) {
+    return req.body;
+  }
+  const headerPayload = req.header('PAYMENT-SIGNATURE') || req.header('X-PAYMENT');
+  if (!headerPayload) {
+    return null;
+  }
+  try {
+    return JSON.parse(headerPayload);
+  } catch {
+    return null;
+  }
+}
+
+router.get('/premium-content', (req, res) => {
+  fetchRequirements().then((requirements) => {
+    const serialized = JSON.stringify(requirements);
+    res.set('PAYMENT-RESPONSE', serialized);
+    res.set('X-PAYMENT-RESPONSE', serialized);
+    res.status(402).json({
+      error: 'Payment required',
+      paymentRequirements: requirements,
+    });
+  }).catch((error) => {
+    console.error('Failed to fetch requirements', error);
+    res.status(500).json({ error: 'Failed to fetch payment requirements' });
   });
 });
 
 router.post('/premium-content', async (req, res) => {
   try {
-    const { paymentPayload, paymentRequirements } = req.body;
+    const parsed = parsePaymentRequest(req);
+    const { paymentPayload, paymentRequirements } = parsed || {};
 
     if (!paymentPayload || !paymentRequirements) {
       return res.status(400).json({ error: 'Missing payment data' });

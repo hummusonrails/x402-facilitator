@@ -74,7 +74,7 @@ npm run dev
 3. **Make Payment**
    - Click "Purchase Content"
    - Approve USDC spending (if first time)
-   - Sign the payment authorization
+   - Sign the payment authorization using requirements from `PAYMENT-RESPONSE`
    - Wait for confirmation
 
 4. **Access Content**
@@ -99,7 +99,7 @@ Before deploying to mainnet:
 
 1. **Update Configuration**
    ```env
-   NETWORK=arbitrum
+   NETWORK=eip155:42161
    USDC_ADDRESS=0xaf88d065e77c8cC2239327C5EDb3A432268e5831
    ```
 
