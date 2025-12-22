@@ -1,12 +1,5 @@
 import type { Address } from 'viem';
 import { z } from 'zod';
-import {
-  PaymentRequirementsSchema as SDKPaymentRequirementsSchema,
-  PaymentPayloadSchema as SDKPaymentPayloadSchema,
-  SupportedEVMNetworks,
-  type PaymentRequirements as SDKPaymentRequirements,
-  type PaymentPayload as SDKPaymentPayload,
-} from 'x402/types';
 
 // EIP-3009 Transfer with Authorization types
 export interface EIP3009Authorization {
@@ -103,10 +96,17 @@ export interface SupportedPaymentKind {
   x402Version: number;
   scheme: 'exact';
   network: string;
+  payTo?: string;
 }
 
 export interface SupportedResponse {
   kinds: SupportedPaymentKind[];
+  versions?: Record<string, { kinds: SupportedPaymentKind[] }>;
+  signingAddresses?: {
+    settlement: string;
+    refund?: string;
+  };
+  extensions?: string[];
 }
 
 export interface HealthResponse {
@@ -120,7 +120,7 @@ export interface HealthResponse {
 export const PaymentPayloadSchema = z.object({
   x402Version: z.number().optional(),
   scheme: z.string(),
-  network: z.string(),
+  network: z.string().min(1),
   payload: z.object({
     from: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
     to: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
@@ -136,7 +136,7 @@ export const PaymentPayloadSchema = z.object({
 
 export const PaymentRequirementsSchema = z.object({
   scheme: z.string(),
-  network: z.string(),
+  network: z.string().min(1),
   token: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   amount: z.string(),
   recipient: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
@@ -154,8 +154,6 @@ export const SettleRequestSchema = z.object({
   paymentPayload: PaymentPayloadSchema,
   paymentRequirements: PaymentRequirementsSchema,
 });
-
-export { SDKPaymentRequirementsSchema, SDKPaymentPayloadSchema, SupportedEVMNetworks };
 
 export interface SDKVerifyResponse {
   valid: boolean;
@@ -192,8 +190,14 @@ export interface RequirementsRequest {
   amount?: string;
   memo?: string;
   currency?: string;
+  x402Version?: number;
+  version?: number;
   extra?: {
     merchantAddress?: string;
+    resource?: string;
+    description?: string;
+    mimeType?: string;
+    outputSchema?: object;
     [key: string]: any;
   };
 }
@@ -225,7 +229,7 @@ export interface PaymentRequirementsResponse {
 // Zod schema for PaymentRequirementsResponse validation
 export const PaymentRequirementsAcceptsSchema = z.object({
   scheme: z.string(),
-  network: z.enum(['arbitrum', 'arbitrum-sepolia', 'base', 'base-sepolia', 'avalanche', 'avalanche-fuji', 'ethereum', 'ethereum-sepolia']),
+  network: z.string().min(1),
   maxAmountRequired: z.string(),
   asset: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   payTo: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
@@ -238,15 +242,14 @@ export const PaymentRequirementsAcceptsSchema = z.object({
 });
 
 export const PaymentRequirementsResponseSchema = z.object({
-  x402Version: z.literal(1),
+  x402Version: z.union([z.literal(1), z.literal(2)]),
   error: z.string(),
   accepts: z.array(PaymentRequirementsAcceptsSchema),
 });
 
-export type { SDKPaymentRequirements, SDKPaymentPayload };
-
 export const SDKVerifyRequestSchema = z.object({
-  network: z.string(),
+  x402Version: z.number().optional(),
+  network: z.string().min(1),
   token: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   recipient: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   amount: z.string(),
@@ -267,6 +270,7 @@ export const SDKVerifyRequestSchema = z.object({
 });
 
 export interface SDKVerifyRequest {
+  x402Version?: number;
   network: string;
   token: string;
   recipient: string;

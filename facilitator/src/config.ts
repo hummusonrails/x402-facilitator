@@ -6,9 +6,24 @@ import { privateKeyToAccount } from 'viem/accounts';
 loadEnv();
 
 export enum Network {
-  ARBITRUM = 'arbitrum',
-  ARBITRUM_SEPOLIA = 'arbitrum-sepolia',
+  ARBITRUM = 'eip155:42161',
+  ARBITRUM_SEPOLIA = 'eip155:421614',
 }
+
+export const LEGACY_NETWORK_ARBITRUM = 'arbitrum';
+export const LEGACY_NETWORK_ARBITRUM_SEPOLIA = 'arbitrum-sepolia';
+
+const ALIAS_TO_CAIP: Record<string, Network> = {
+  [Network.ARBITRUM]: Network.ARBITRUM,
+  [Network.ARBITRUM_SEPOLIA]: Network.ARBITRUM_SEPOLIA,
+  [LEGACY_NETWORK_ARBITRUM]: Network.ARBITRUM,
+  [LEGACY_NETWORK_ARBITRUM_SEPOLIA]: Network.ARBITRUM_SEPOLIA,
+};
+
+const CAIP_TO_LEGACY: Record<Network, string> = {
+  [Network.ARBITRUM]: LEGACY_NETWORK_ARBITRUM,
+  [Network.ARBITRUM_SEPOLIA]: LEGACY_NETWORK_ARBITRUM_SEPOLIA,
+};
 
 export const CHAIN_ID_ARBITRUM = 42161;
 export const CHAIN_ID_ARBITRUM_SEPOLIA = 421614;
@@ -20,21 +35,28 @@ export const USDC_NAME = 'USD Coin';
 export const USDC_VERSION = '2';
 interface NetworkConfig {
   network: Network;
+  legacyNetwork: string;
   chainId: number;
   chain: Chain;
   rpcUrl: string;
   usdcAddress: string;
 }
 
-const activeNetwork = (process.env.NETWORK || Network.ARBITRUM_SEPOLIA) as Network;
-
-if (!Object.values(Network).includes(activeNetwork)) {
-  throw new Error(`Invalid NETWORK: ${activeNetwork}. Must be one of: ${Object.values(Network).join(', ')}`);
+function resolveNetwork(value: string): Network {
+  const normalized = ALIAS_TO_CAIP[value];
+  if (!normalized) {
+    throw new Error(`Invalid NETWORK: ${value}. Supported: ${Object.keys(ALIAS_TO_CAIP).join(', ')}`);
+  }
+  return normalized;
 }
+
+const envNetwork = process.env.NETWORK || LEGACY_NETWORK_ARBITRUM_SEPOLIA;
+const activeNetwork = resolveNetwork(envNetwork);
 
 const networkConfigs: Record<Network, NetworkConfig> = {
   [Network.ARBITRUM]: {
     network: Network.ARBITRUM,
+    legacyNetwork: LEGACY_NETWORK_ARBITRUM,
     chainId: CHAIN_ID_ARBITRUM,
     chain: arbitrum,
     rpcUrl: process.env.ARBITRUM_RPC_URL || 'https://arb1.arbitrum.io/rpc',
@@ -42,6 +64,7 @@ const networkConfigs: Record<Network, NetworkConfig> = {
   },
   [Network.ARBITRUM_SEPOLIA]: {
     network: Network.ARBITRUM_SEPOLIA,
+    legacyNetwork: LEGACY_NETWORK_ARBITRUM_SEPOLIA,
     chainId: CHAIN_ID_ARBITRUM_SEPOLIA,
     chain: arbitrumSepolia,
     rpcUrl: process.env.ARBITRUM_SEPOLIA_RPC_URL || 'https://sepolia-rollup.arbitrum.io/rpc',
@@ -50,6 +73,15 @@ const networkConfigs: Record<Network, NetworkConfig> = {
 };
 
 export const config = networkConfigs[activeNetwork];
+
+export function normalizeNetworkId(network: string): string {
+  return ALIAS_TO_CAIP[network] || network;
+}
+
+export function toLegacyNetworkId(network: string): string {
+  const caip = ALIAS_TO_CAIP[network] || network;
+  return CAIP_TO_LEGACY[caip as Network] || network;
+}
 
 let privateKey = process.env.EVM_PRIVATE_KEY || process.env.FACILITATOR_PRIVATE_KEY || process.env.PRIVATE_KEY || '';
 

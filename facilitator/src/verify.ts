@@ -1,5 +1,5 @@
 import { Address } from 'viem';
-import { config, USDC_NAME, USDC_VERSION, SERVICE_FEE_BPS, GAS_FEE_USDC } from './config.js';
+import { config, USDC_NAME, USDC_VERSION, SERVICE_FEE_BPS, GAS_FEE_USDC, normalizeNetworkId } from './config.js';
 import { verifyTransferAuthorization } from './eip3009.js';
 import { createIfAbsent } from './nonceStore.js';
 import { isDatabaseConfigured } from './db.js';
@@ -35,7 +35,8 @@ export async function verifyPayment(
     };
   }
 
-  if (paymentRequirements.network !== config.network) {
+  const requirementNetwork = normalizeNetworkId(paymentRequirements.network);
+  if (requirementNetwork !== config.network) {
     logger.warn('Invalid network', { 
       requested: paymentRequirements.network, 
       configured: config.network 
@@ -46,7 +47,8 @@ export async function verifyPayment(
     };
   }
 
-  if (paymentPayload.network !== config.network) {
+  const payloadNetwork = normalizeNetworkId(paymentPayload.network);
+  if (payloadNetwork !== config.network) {
     logger.warn('Payload network mismatch', { network: paymentPayload.network });
     return {
       valid: false,
