@@ -111,7 +111,7 @@ Runnable Express.js resource server plus a paying client.
 - `npm start` runs the server, `npm run client` pays for the protected route
 
 ### Next.js App
-README guide for protecting a Next.js API route with `@x402/next`.
+Runnable Next.js 16 app protecting an API route with `@x402/next`.
 - Location: `./nextjs-app`
 - `withX402` route wrapper
 - `payTo` read dynamically from the facilitator

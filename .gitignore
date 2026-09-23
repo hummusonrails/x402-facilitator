@@ -21,6 +21,7 @@ Thumbs.db
 
 # Foundry
 lib/
+!x402-examples/nextjs-app/lib/
 broadcast/
 cache_forge/
 

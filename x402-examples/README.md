@@ -32,15 +32,15 @@ A runnable Express.js server and client showing:
 - Settlement through the facilitator with a merchant API key
 - A paying client built with `@x402/fetch`
 
-### 2. Next.js Full-Stack App
+### 2. Next.js App
 **Best for:** Modern web applications, full-stack projects
 
 [View Example](./nextjs-app/)
 
-A README-only guide for Next.js with:
+A runnable Next.js 16 app (App Router, React 19, TypeScript) with:
 - `withX402` from `@x402/next` protecting an API route
 - Dynamic `payTo` read from the facilitator
-- TypeScript snippets
+- Settlement only after the route handler succeeds
 
 ### 3. React Client
 **Best for:** Frontend-only applications, SPAs
@@ -57,7 +57,7 @@ A README-only guide for a React frontend with:
 Each example includes:
 - Environment configuration
 - Step-by-step setup instructions
-- Code for the server or client side (`basic-express` is fully runnable; `nextjs-app` and `react-client` are snippets in their READMEs)
+- Code for the server or client side (`basic-express` and `nextjs-app` are runnable; `react-client` is snippets in its README)
 
 ## Prerequisites
 

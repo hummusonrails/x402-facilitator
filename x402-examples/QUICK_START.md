@@ -42,7 +42,15 @@ npm run client
 
 ### Option B: Next.js (Full-Stack)
 
-The `nextjs-app` directory is a guide: follow its README to add `@x402/next` to your own Next.js app.
+```bash
+cd nextjs-app
+npm install
+cp .env.example .env.local
+# Edit .env.local with FACILITATOR_URL, MERCHANT_API_KEY, and NETWORK
+npm run dev
+```
+
+Pay for `http://localhost:3000/api/premium-content` with the `basic-express` client (`RESOURCE_URL=http://localhost:3000/api/premium-content npm run client`).
 
 ### Option C: React Client (Frontend Only)
 
