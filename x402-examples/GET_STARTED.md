@@ -4,216 +4,156 @@ This directory contains example integrations with the X402 Facilitator for Arbit
 
 ## Overview
 
-The x402 protocol simplifies payment integration:
+The facilitator implements the x402 v2 facilitator API (`/verify`, `/settle`, `/supported`), so you integrate with the official SDKs from [x402-foundation/x402](https://github.com/x402-foundation/x402) instead of hand-rolling requests:
 
-1. **Client only needs**: `NEXT_PUBLIC_FACILITATOR_URL`
-2. **Facilitator provides**: All payment requirements in the `PAYMENT-RESPONSE` header, including its own address
-3. **Fee model enforced**: Server-side by facilitator, cannot be bypassed
-4. **Simplified setup**: No address management in client configuration
+1. **Resource server**: `@x402/express` or `@x402/next` middleware with an `HTTPFacilitatorClient` pointed at the facilitator
+2. **Client**: `@x402/fetch` or `@x402/axios` with an `ExactEvmScheme` signer from `@x402/evm`
+3. **Fee model**: buyers pay the facilitator's signer address; the facilitator keeps its fee and forwards your share to the address tied to your API key
+4. **Configuration**: the facilitator URL, your merchant API key, and the network
 
 ## Integration Flow
 
 ```
-1. Client → POST /requirements → Facilitator  
-   Request: { amount, memo, extra: { merchantAddress } }  
-   Response: { x402Version: 2, accepts: [{ scheme, network (CAIP-2), asset, payTo, maxAmountRequired, extra { nonce, deadline, feeMode... } }] } in `PAYMENT-RESPONSE`
+1. Server startup: GET /supported -> Facilitator
+   Response: { kinds: [...], extensions: [], signers: { "eip155:*": ["0xFacilitatorAddress"] } }
+   The signer address is your payTo.
 
-2. Client creates EIP-3009 permit using `payTo` and `maxAmountRequired`
+2. Client -> GET /api/premium-content -> Your server
+   402 with PAYMENT-REQUIRED header (base64 PaymentRequired:
+   { x402Version: 2, resource, accepts: [{ scheme: "exact", network: "eip155:421614",
+     amount, asset, payTo, maxTimeoutSeconds, extra: { name: "USD Coin", version: "2" } }] })
 
-3. Client → POST /verify → Facilitator (optional)  
-   Body or `PAYMENT-SIGNATURE` header: { paymentPayload, paymentRequirements }
+3. Client signs an EIP-3009 authorization (to = payTo, value = amount)
+   and retries with PAYMENT-SIGNATURE header (base64 PaymentPayload)
 
-4. Merchant Backend → POST /settle → Facilitator  
-   Body or `PAYMENT-SIGNATURE` header: { paymentPayload, paymentRequirements }  
-   Response: { success: true, txHash, meta }
+4. Your server -> POST /verify -> Facilitator (public)
+   Body: { x402Version: 2, paymentPayload, paymentRequirements }
+   Response: { isValid, invalidReason?, payer }
+
+5. Your server -> POST /settle -> Facilitator (X-API-Key)
+   Body: same as /verify
+   Response: { success, transaction, network, payer, amount, extra: { merchantAddress, forward, feeBreakdown } }
+
+6. Your server -> 200 with PAYMENT-RESPONSE header (base64 settle response)
 ```
 
-## SDK Compatibility
-
-The facilitator is wire-compatible with the `@x402` SDK schemas:
-- `PaymentRequirements` structure matches SDK expectations
-- `PaymentPayload` with `permit` field follows SDK format
-- Responses include SDK-standard fields (`valid`/`reason`, `success`/`txHash`)
-- Additional data provided in `meta` field for rich integrations
+Steps 2 through 6 are handled by the SDK middleware and client wrapper.
 
 ## Quick Start Code Example
 
+Server (Express):
+
 ```typescript
-const facilitatorUrl = process.env.NEXT_PUBLIC_FACILITATOR_URL;
-const merchantAddress = '0xYourMerchantAddress';
+import express from 'express';
+import { paymentMiddleware, x402ResourceServer } from '@x402/express';
+import { ExactEvmScheme } from '@x402/evm/exact/server';
+import { HTTPFacilitatorClient } from '@x402/core/server';
 
-// Step 1: Fetch requirements from facilitator
-async function getPaymentRequirements(amount: string, memo: string) {
-  const response = await fetch(`${facilitatorUrl}/requirements`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      amount,
-      memo,
-      extra: { merchantAddress }
-    })
-  });
-  return response.json();
-}
+const FACILITATOR_URL = process.env.FACILITATOR_URL!;
+const NETWORK = 'eip155:421614';
 
-// Step 2: Create EIP-3009 permit (using viem or ethers)
-async function createPermit(requirements: any, signer: any) {
-  const domain = {
-    name: 'USD Coin',
-    version: '2',
-    chainId: 421614, // Arbitrum Sepolia
-    verifyingContract: requirements.token,
-  };
+const facilitatorClient = new HTTPFacilitatorClient({
+  url: FACILITATOR_URL,
+  createAuthHeaders: async () => ({
+    verify: {},
+    settle: { 'X-API-Key': process.env.MERCHANT_API_KEY! },
+    supported: {},
+  }),
+});
+const resourceServer = new x402ResourceServer(facilitatorClient).register(NETWORK, new ExactEvmScheme());
 
-  const types = {
-    TransferWithAuthorization: [
-      { name: 'from', type: 'address' },
-      { name: 'to', type: 'address' },
-      { name: 'value', type: 'uint256' },
-      { name: 'validAfter', type: 'uint256' },
-      { name: 'validBefore', type: 'uint256' },
-      { name: 'nonce', type: 'bytes32' },
-    ],
-  };
+const supported = await fetch(`${FACILITATOR_URL}/supported`).then((r) => r.json());
+const payTo = supported.signers['eip155:*'][0];
 
-  const message = {
-    from: await signer.getAddress(),
-    to: requirements.recipient, // Facilitator address from requirements
-    value: requirements.amount,
-    validAfter: 0,
-    validBefore: requirements.deadline,
-    nonce: requirements.nonce,
-  };
-
-  const signature = await signer._signTypedData(domain, types, message);
-  
-  return {
-    owner: message.from,
-    spender: message.to,
-    value: message.value.toString(),
-    deadline: message.validBefore,
-    sig: signature,
-  };
-}
-
-// Step 3: Verify payment
-async function verifyPayment(requirements: any, permit: any) {
-  const response = await fetch(`${facilitatorUrl}/verify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ...requirements,
-      permit,
-    })
-  });
-  return response.json();
-}
-
-// Step 4: Settle payment (backend only, requires merchant API key)
-async function settlePayment(requirements: any, permit: any) {
-  const response = await fetch(`${facilitatorUrl}/settle`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': process.env.MERCHANT_API_KEY,
+const app = express();
+app.use(
+  paymentMiddleware(
+    {
+      'GET /api/premium-content': {
+        accepts: { scheme: 'exact', price: '$0.50', network: NETWORK, payTo },
+        description: 'Access to premium content',
+      },
     },
-    body: JSON.stringify({
-      ...requirements,
-      permit,
-    })
-  });
-  return response.json();
-}
+    resourceServer,
+  ),
+);
+app.get('/api/premium-content', (_req, res) => res.json({ data: 'premium' }));
+app.listen(3000);
+```
 
-// Usage
-const requirements = await getPaymentRequirements('2500000', 'Order #123');
-const permit = await createPermit(requirements, signer);
-const verification = await verifyPayment(requirements, permit);
+Client:
 
-if (verification.valid) {
-  const settlement = await settlePayment(requirements, permit);
-  console.log('Payment successful:', settlement.txHash);
+```typescript
+import { wrapFetchWithPaymentFromConfig, decodePaymentResponseHeader } from '@x402/fetch';
+import { ExactEvmScheme } from '@x402/evm';
+import { privateKeyToAccount } from 'viem/accounts';
+
+const account = privateKeyToAccount(process.env.PAYER_PRIVATE_KEY as `0x${string}`);
+const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, {
+  schemes: [{ network: 'eip155:421614', client: new ExactEvmScheme(account) }],
+});
+
+const response = await fetchWithPayment('http://localhost:3000/api/premium-content');
+console.log(await response.json());
+
+const header = response.headers.get('PAYMENT-RESPONSE');
+if (header) {
+  const settlement = decodePaymentResponseHeader(header);
+  console.log('Payment tx:', settlement.transaction);
 }
 ```
 
 ## Available Examples
 
 ### Basic Express
-Simple Express.js server demonstrating x402 integration.
+Runnable Express.js resource server plus a paying client.
 - Location: `./basic-express`
-- No client, server-side only
-- Shows requirements generation and settlement
+- `npm start` runs the server, `npm run client` pays for the protected route
 
 ### Next.js App
-Full-stack Next.js application with x402 payment flow.
+README guide for protecting a Next.js API route with `@x402/next`.
 - Location: `./nextjs-app`
-- Client-side permit creation
-- Server-side settlement
-- **No facilitator address in env vars**
+- `withX402` route wrapper
+- `payTo` read dynamically from the facilitator
 
 ### React Client
-React SPA demonstrating client-side integration.
+README guide for paying from the browser.
 - Location: `./react-client`
-- Fetches requirements dynamically
-- Creates and signs permits
-- Delegates settlement to backend
+- wagmi wallet client as the x402 signer
+- `@x402/fetch` handles the 402 and retry
 
 ## Environment Variables
 
-### Client-Side (Frontend)
+### Resource server
 ```env
-NEXT_PUBLIC_FACILITATOR_URL=http://localhost:3002
-```
-
-### Server-Side (Backend)
-```env
+FACILITATOR_URL=http://localhost:3002
 MERCHANT_API_KEY=your_api_key_here
-MERCHANT_ADDRESS=0xYourMerchantAddress
+NETWORK=eip155:421614
 ```
 
-**Note**: No facilitator address needed in configuration!
-
-## Key Differences from Traditional Integration
-
-### Before (Traditional)
-```typescript
-// Client needs to know facilitator address
-const FACILITATOR_ADDRESS = '0xFAC1...C1T0R'; // ❌ Hardcoded
-
-const paymentRequirements = {
-  recipient: FACILITATOR_ADDRESS,
-  amount: '1000000',
-  nonce: generateNonce(), // Client generates
-  // ...
-};
+### Client
+```env
+RESOURCE_URL=http://localhost:3000/api/premium-content
+PAYER_PRIVATE_KEY=0xYourTestWalletPrivateKey   # Node clients only; browsers use the connected wallet
 ```
 
-### After (x402)
-```typescript
-// Client only needs URL
-const requirements = await fetch(
-  `${FACILITATOR_URL}/requirements`,
-  { method: 'POST', body: JSON.stringify({ amount: '1000000' }) }
-).then(r => r.json());
-
-// Facilitator provides everything including its address
-const permit = await createPermit(requirements); 
-```
+**Note**: No facilitator or merchant address is needed in configuration. `payTo` comes from `GET /supported`, and your merchant address comes from your API key.
 
 ## Benefits
 
-- **Simplified configuration**: Only facilitator URL needed
-- **No address management**: Facilitator address provided dynamically
-- **Dynamic requirements**: Fees and terms fetched at runtime
-- **Server-enforced security**: Fee model enforced server-side
+- **Standard SDKs**: the official x402 middleware and clients work unchanged
+- **No address management**: the facilitator address is discovered at runtime
+- **Server-enforced fees**: the fee split is computed by the facilitator at settlement
+- **Backward compatible**: x402 v1 payloads are still accepted
 
 ## Testing
 
 1. Start the facilitator: `cd ../facilitator && pnpm dev`
-2. Choose an example: `cd basic-express` (or `nextjs-app` or `react-client`)
+2. Go to the runnable example: `cd basic-express`
 3. Install dependencies: `npm install`
-4. Configure env vars: `cp .env.example .env.local`
-5. Run example: `npm run dev`
+4. Configure env vars: `cp .env.example .env`
+5. Run the server: `npm start`
+6. In another terminal, pay for the route: `npm run client`
 
 ## Next Steps
 

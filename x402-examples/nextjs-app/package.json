@@ -5,16 +5,18 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "start": "next start"
   },
   "dependencies": {
-    "next": "14.0.0",
+    "@tanstack/react-query": "^5.0.0",
+    "@x402/core": "^2.27.0",
+    "@x402/evm": "^2.27.0",
+    "@x402/next": "^2.27.0",
+    "next": "^16.2.6",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "viem": "^2.0.0",
-    "wagmi": "^2.0.0",
-    "@tanstack/react-query": "^5.0.0"
+    "wagmi": "^2.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

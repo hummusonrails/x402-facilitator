@@ -4,24 +4,28 @@ An x402 payment facilitator service for Arbitrum with multi-merchant support, au
 
 ## Overview
 
-This facilitator enables merchants to accept USDC payments on Arbitrum using the x402 HTTP payment protocol with EIP-3009 transfer authorizations. The service handles payment verification, onchain settlement, fee collection, and automatic recovery of failed transactions.
+This facilitator enables merchants to accept USDC payments on Arbitrum using the [x402 v2 protocol](https://github.com/x402-foundation/x402) with EIP-3009 `transferWithAuthorization`. It implements the standard facilitator API (`/verify`, `/settle`, `/supported`), so resource servers built with the official `@x402/*` SDKs can point at it directly. The service handles payment verification, onchain settlement, fee collection, and automatic recovery of failed transactions.
+
+Buyers pay the facilitator's signer address. The facilitator pulls the payment to itself, keeps its fee, and forwards the merchant share to the merchant address tied to the API key used on `/settle`.
 
 ### Key Features
 
 **Payment Processing**
-- EIP-3009 transfer authorization verification and execution
-- Two-step settlement flow: user to facilitator, facilitator to merchant
+- x402 `exact` scheme on EVM with EIP-3009 transfer authorizations (`assetTransferMethod: "eip3009"`)
+- Two-step settlement flow: buyer to facilitator, facilitator to merchant
 - Automatic fee calculation and collection (service fee + gas reimbursement)
-- Support for multiple registered merchants
-- Strict validation of network, token, recipient, amount, and timing
+- Support for multiple registered merchants, identified by API key
+- Strict validation of network, asset, recipient, amount, timing, nonce, and signature (EOA, EIP-1271, and EIP-7702 delegated accounts)
 
 **SDK Compatibility**
-- Wire-level compatibility with [x402 SDK](https://www.npmjs.com/package/@x402/core) schemas
-- Server-side fee model enforcement
-- Dynamic requirements generation via `/requirements` endpoints
+- Spec-compliant request and response shapes for `/verify`, `/settle`, and `/supported`
+- Works with `HTTPFacilitatorClient` from [`@x402/core`](https://www.npmjs.com/package/@x402/core) and the official middleware (`@x402/express`, `@x402/next`) and clients (`@x402/fetch`)
+- x402 v1 payloads remain accepted for backward compatibility
+- `/requirements` helper for building a `PaymentRequired` object by hand
 
 **Reliability and Recovery**
 - PostgreSQL-based persistent nonce storage with advisory locks
+- Idempotent `/settle`: retrying a pending settlement reconciles against the broadcast transaction instead of rebroadcasting
 - Automatic recovery worker for incomplete settlements
 - Exponential backoff retry mechanism
 - Manual refund capability for failed payments
@@ -38,7 +42,7 @@ This facilitator enables merchants to accept USDC payments on Arbitrum using the
 
 - Node.js
 - PostgreSQL
-- Private key for facilitator account (pays gas, receives fees)
+- Private key for facilitator account (pays gas, receives payments and fees)
 - RPC access to Arbitrum networks
 
 ### Installation
@@ -63,6 +67,9 @@ docker-compose up -d
 # Run migrations
 psql $DATABASE_URL -f migrations/001_init.sql
 psql $DATABASE_URL -f migrations/002_merchants.sql
+psql $DATABASE_URL -f migrations/003_merchant_approval.sql
+psql $DATABASE_URL -f migrations/004_merchant_contact_info.sql
+psql $DATABASE_URL -f migrations/005_add_fee_columns.sql
 ```
 
 ### Configuration
@@ -74,7 +81,9 @@ cp .env.example .env
 Edit `.env` with your configuration:
 
 ```env
-# Network (CAIP-2: eip155:421614 or eip155:42161; legacy names still accepted)
+# Network this instance settles on (exactly one per instance)
+# CAIP-2: eip155:421614 (Arbitrum Sepolia) or eip155:42161 (Arbitrum One)
+# Legacy names arbitrum-sepolia / arbitrum are still accepted
 NETWORK=eip155:421614
 
 # Database (REQUIRED for production)
@@ -84,16 +93,20 @@ POSTGRES_DB=facilitator
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 
-# Facilitator private key (placeholder - use your actual private key)
+# Facilitator private key (placeholder, use your actual private key)
 FACILITATOR_PRIVATE_KEY=0x0000000000000000000000000000000000000000000000000000000000000000
 
 # Admin API key hash (generate with: pnpm generate-api-key)
-# Placeholder example - do not use in production
+# Placeholder example, do not use in production
 ADMIN_API_KEY_HASH=$2b$10$placeholder.hash.do.not.use.in.production
 
 # Fee configuration
 SERVICE_FEE_BPS=50        # 0.5%
 GAS_FEE_USDC=100000       # 0.1 USDC
+
+# Settlement limits and timeouts
+MAX_SETTLEMENT_AMOUNT=1000000000           # 1000 USDC
+SETTLEMENT_CONFIRMATION_TIMEOUT_MS=180000  # wait this long for a receipt before returning settlement_pending
 
 # Merchants are stored in database (see docs/MERCHANT_MANAGEMENT.md)
 # Add merchants with: pnpm merchants add <address> <name> <apiKeyHash>
@@ -146,6 +159,8 @@ docker run -p 3002:3002 --env-file .env x402-facilitator
 
 **Important:** All code examples below use placeholder values. Never hardcode real API keys, private keys, or sensitive data in documentation or source code.
 
+The request and response shapes follow the [x402 v2 specification](https://github.com/x402-foundation/x402/tree/main/specs). Amounts are strings in USDC base units (6 decimals), so `"500000"` is 0.50 USDC.
+
 ### Public Endpoints
 
 **`GET /health`**
@@ -163,186 +178,244 @@ Health check with network information.
 
 **`GET /supported`**
 
-Returns supported payment kinds.
+Returns the payment kinds this instance supports and its signer address. Each instance settles on exactly one network, advertised once as x402 v2 (CAIP-2 id) and once as v1 (legacy name).
 
 ```json
 {
   "kinds": [
-    { "x402Version": 1, "scheme": "exact", "network": "arbitrum" },
-    { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" },
-    { "x402Version": 2, "scheme": "exact", "network": "eip155:42161", "payTo": "0x..." },
-    { "x402Version": 2, "scheme": "exact", "network": "eip155:421614", "payTo": "0x..." }
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:421614" },
+    { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" }
   ],
-  "versions": {
-    "1": { "kinds": [{ "x402Version": 1, "scheme": "exact", "network": "arbitrum" }, { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" }] },
-    "2": { "kinds": [{ "x402Version": 2, "scheme": "exact", "network": "eip155:42161", "payTo": "0x..." }, { "x402Version": 2, "scheme": "exact", "network": "eip155:421614", "payTo": "0x..." }] }
-  },
-  "signingAddresses": {
-    "settlement": "0x..."
+  "extensions": [],
+  "signers": {
+    "eip155:*": ["0xFacilitatorAddress"]
   }
 }
 ```
 
-**`GET /requirements`**
+The address in `signers["eip155:*"]` is the `payTo` address resource servers must put in their payment requirements.
 
-Returns default payment requirements with facilitator address. Requirements are also included in the `PAYMENT-RESPONSE` header (mirrored to `X-PAYMENT-RESPONSE`).
+**`POST /verify`**
+
+Checks a payment without executing it. No authentication required. `/verify` is read-only: it does not record the nonce, so a resource server can verify and later settle the same payload.
+
+Request:
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "resource": {
+      "url": "https://api.example.com/premium-content",
+      "description": "Access to premium content",
+      "mimeType": "application/json"
+    },
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:421614",
+      "amount": "500000",
+      "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+      "payTo": "0xFacilitatorAddress",
+      "maxTimeoutSeconds": 300,
+      "extra": { "name": "USD Coin", "version": "2" }
+    },
+    "payload": {
+      "signature": "0xSIGNATURE",
+      "authorization": {
+        "from": "0xPayerAddress",
+        "to": "0xFacilitatorAddress",
+        "value": "500000",
+        "validAfter": "1740672089",
+        "validBefore": "1740672389",
+        "nonce": "0xUNIQUE32BYTENONCE"
+      }
+    }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:421614",
+    "amount": "500000",
+    "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+    "payTo": "0xFacilitatorAddress",
+    "maxTimeoutSeconds": 300,
+    "extra": { "name": "USD Coin", "version": "2" }
+  }
+}
+```
+
+Response (200):
+```json
+{ "isValid": true, "payer": "0xPayerAddress" }
+```
+
+```json
+{
+  "isValid": false,
+  "invalidReason": "invalid_exact_evm_payload_authorization_valid_before",
+  "payer": "0xPayerAddress"
+}
+```
+
+Some failures also include a human-readable `invalidMessage`.
+
+A malformed request returns 400 with `isValid: false` and `invalidReason` set to `invalid_payload`, `invalid_payment_requirements`, `invalid_x402_version`, or `unsupported_payload_type`.
+
+What verification checks:
+- `scheme` is `exact` and `network` matches this instance
+- `paymentPayload.accepted` matches `paymentRequirements` (v2)
+- `asset` is USDC and `extra.name` / `extra.version` match its EIP-712 domain (`"USD Coin"`, `"2"`)
+- `payTo` is the facilitator and `authorization.to` equals `payTo`
+- Signature, checked the same way USDC's `SignatureChecker` does: `ecrecover` for EOAs, EIP-1271 for smart wallets and EIP-7702 delegated EOAs (undeployed ERC-6492 wallets are not supported)
+- `validAfter <= now` and `validBefore >= now + 6s`
+- `authorization.value` equals `amount` exactly; `amount` covers the gas fee and does not exceed `MAX_SETTLEMENT_AMOUNT`
+- Nonce unused (database and onchain `authorizationState`), payer balance, and a `transferWithAuthorization` simulation
+
+Only the EIP-3009 transfer method (the spec default) is supported. Payloads using Permit2 or ERC-7710 are rejected with `unsupported_payload_type`.
+
+**x402 v1 (backward compatibility):** v1 payloads are still accepted. Send `{"x402Version": 1, "paymentPayload": {"x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia", "payload": {"signature", "authorization"}}, "paymentRequirements": {...}}` where the v1 requirements carry `scheme`, `network`, `maxAmountRequired`, `resource`, `description`, `mimeType`, `payTo`, `maxTimeoutSeconds`, `asset`, and `extra`.
+
+**`GET /requirements`** and **`POST /requirements`**
+
+Optional helper that builds a `PaymentRequired` object with the correct `payTo`, `asset`, and `extra` for this instance. Resource servers using the official SDKs do not need it. It returns 200 (not 402) with the object in the body and, for v2, the same object base64-encoded in the `PAYMENT-REQUIRED` header.
+
+```bash
+curl "http://localhost:3002/requirements?amount=500000"
+# add &version=1 for the v1 shape (body only)
+```
+
+```bash
+curl -X POST http://localhost:3002/requirements \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": "500000",
+    "resource": {
+      "url": "https://api.example.com/premium-content",
+      "description": "Access to premium content",
+      "mimeType": "application/json"
+    },
+    "extra": { "merchantAddress": "0xMerchantAddress" }
+  }'
+```
 
 Response:
 ```json
 {
   "x402Version": 2,
   "error": "Payment required",
+  "resource": {
+    "url": "https://api.example.com/premium-content",
+    "description": "Access to premium content",
+    "mimeType": "application/json"
+  },
   "accepts": [
     {
       "scheme": "exact",
       "network": "eip155:421614",
-      "maxAmountRequired": "1000000",
+      "amount": "500000",
       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-      "payTo": "0xFACILITATOR_ADDRESS",
-      "resource": "http://localhost:3002/resource",
-      "description": "Payment required for resource access",
-      "mimeType": "application/json",
-      "maxTimeoutSeconds": 3600,
+      "payTo": "0xFacilitatorAddress",
+      "maxTimeoutSeconds": 300,
       "extra": {
-        "feeMode": "facilitator_split",
+        "name": "USD Coin",
+        "version": "2",
         "feeBps": 50,
-        "gasBufferWei": "100000",
-        "nonce": "0xEXAMPLE1234567890abcdef",
-        "deadline": 1731024000
+        "gasFee": "100000",
+        "merchantAddress": "0xMerchantAddress"
       }
     }
   ]
 }
 ```
 
-**`POST /requirements`**
-
-Generates payment requirements with specific amount and merchant address.
-
-Request:
-```json
-{
-  "amount": "2500000",
-  "memo": "Order #A1234",
-  "extra": {
-    "merchantAddress": "0xMERCH...ADD"
-  }
-}
-```
-
-Response:
-```json
-{
-  "x402Version": 2,
-  "error": "Payment required",
-  "accepts": [
-    {
-      "scheme": "exact",
-      "network": "eip155:42161",
-      "maxAmountRequired": "2500000",
-      "asset": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-      "payTo": "0xFACILITATOR_ADDRESS",
-      "resource": "http://localhost:3002/resource",
-      "description": "Order #A1234",
-      "mimeType": "application/json",
-      "maxTimeoutSeconds": 3600,
-      "extra": {
-        "feeMode": "facilitator_split",
-        "merchantAddress": "0xMERCHANTADDRESS1234567890abcdef",
-        "feeBps": 120,
-        "gasBufferWei": "150000",
-        "nonce": "0xEXAMPLE9876543210fedcba",
-        "deadline": 1731024000
-      }
-    }
-  ]
-}
-```
-
-**`POST /verify`**
-
-Verifies payment payload without executing settlement. No authentication required. Accepts SDK-compatible format.
-
-Request:
-```json
-{
-  "network": "eip155:42161",
-  "token": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-  "recipient": "0xFACILITATOR_ADDRESS",  // Must match facilitator address
-  "amount": "2500000",
-  "nonce": "0xEXAMPLE9876543210fedcba",  // Example nonce - unique per request
-  "deadline": 1731024000,
-  "memo": "Order #A1234",
-  "extra": {
-    "merchantAddress": "0xMERCHANTADDRESS1234567890abcdef",  // Placeholder merchant address
-    "feeMode": "facilitator_split"
-  },
-  "permit": {
-    "owner": "0xBUYERADDRESS1234567890abcdef",  // Placeholder buyer address
-    "spender": "0xFACILITATOR_ADDRESS",  // Must match facilitator address
-    "value": "2500000",
-    "deadline": 1731024000,
-    "sig": "0xSIG..."
-  }
-}
-```
-
-Response:
-```json
-{
-  "valid": true,
-  "reason": null,
-  "meta": {
-    "facilitatorRecipient": "0xFACILITATOR_ADDRESS"
-  }
-}
-```
+`feeBps`, `gasFee`, and `merchantAddress` in `extra` are informational. The merchant that gets paid is always the one tied to the API key used on `/settle`.
 
 ### Authenticated Endpoints
 
 **`POST /settle`**
 
-Executes onchain settlement. Requires merchant API key. Accepts SDK-compatible format.
+Executes the payment onchain and forwards the merchant share. Requires a merchant API key. The body is the same as `/verify`.
 
 Headers:
 ```
-X-API-Key: your_merchant_api_key_here  # Placeholder - use your actual API key
+X-API-Key: your_merchant_api_key_here
 ```
 
-Request: Same format as `/verify` (SDK-compatible with permit)
-
-Response:
+Response (200):
 ```json
 {
   "success": true,
-  "txHash": "0xONCHAIN...",
-  "meta": {
-    "journalId": "0x3c2d...ab",
-    "grossAmount": "2500000",
-    "feeAmount": "30000",
-    "merchantNet": "2470000",
-    "forwardTxHash": "0xFORWARD...",
-    "incomingTxHash": "0xINCOMING...",
-    "outgoingTxHash": "0xOUTGOING...",
-    "blockNumber": 12345678,
-    "status": "FORWARDED"
-  },
-  "transactionHash": "0xONCHAIN...",
-  "incomingTransactionHash": "0xINCOMING...",
-  "outgoingTransactionHash": "0xOUTGOING...",
-  "blockNumber": 12345678,
-  "status": "confirmed",
-  "merchantAddress": "0xMERCH...",
-  "feeBreakdown": {
-    "merchantAmount": "2470000",
-    "serviceFee": "12350",
-    "gasFee": "100000",
-    "totalAmount": "2500000"
+  "payer": "0xPayerAddress",
+  "transaction": "0xPAYER_TRANSFER_TX_HASH",
+  "network": "eip155:421614",
+  "amount": "500000",
+  "extra": {
+    "merchantAddress": "0xMerchantAddress",
+    "forward": {
+      "status": "complete",
+      "transaction": "0xFORWARD_TX_HASH"
+    },
+    "feeBreakdown": {
+      "merchantAmount": "398009",
+      "serviceFee": "1991",
+      "gasFee": "100000",
+      "totalAmount": "500000"
+    }
   }
 }
 ```
 
+`transaction` is the buyer to facilitator transfer. `extra.forward` describes the facilitator to merchant transfer: `"complete"` means it confirmed, `"pending"` means the buyer's payment landed but forwarding will be retried by the recovery worker.
+
+Failure:
+```json
+{
+  "success": false,
+  "errorReason": "invalid_exact_evm_nonce_already_used",
+  "payer": "0xPayerAddress",
+  "transaction": "",
+  "network": "eip155:421614"
+}
+```
+
+Some failures also include an `errorMessage`. `errorReason: "settlement_pending"` is not terminal: the transaction was broadcast but not confirmed within `SETTLEMENT_CONFIRMATION_TIMEOUT_MS`, and `transaction` holds its hash. Retrying the identical payload with the same merchant key reconciles against that transaction instead of broadcasting a new one.
+
+Authentication failures return 401 (missing or invalid key) or 403 (merchant disabled or pending approval) with `{ "error": "..." }`.
+
+### Error Codes
+
+`invalidReason` (verify) and `errorReason` (settle) use the spec's error codes:
+
+| Code | Meaning |
+|------|---------|
+| `invalid_payload`, `invalid_payment_requirements`, `invalid_x402_version` | Malformed request |
+| `unsupported_payload_type` | Not an EIP-3009 payload (Permit2, ERC-7710) |
+| `invalid_network`, `invalid_exact_evm_network_mismatch` | Network is not the one this instance settles on |
+| `invalid_exact_evm_scheme` | Scheme is not `exact` |
+| `invalid_exact_evm_missing_eip712_domain`, `invalid_exact_evm_token_name_mismatch`, `invalid_exact_evm_token_version_mismatch` | `extra.name` / `extra.version` missing or wrong |
+| `invalid_exact_evm_recipient_mismatch` | `payTo` or `authorization.to` is not the facilitator |
+| `invalid_exact_evm_signature` | Signature does not verify |
+| `invalid_exact_evm_payload_authorization_valid_before`, `invalid_exact_evm_payload_authorization_valid_after` | Authorization expired, expires too soon, or not yet valid |
+| `invalid_exact_evm_payload_authorization_value_mismatch` | `authorization.value` differs from `amount` |
+| `invalid_exact_evm_nonce_already_used` | Nonce already used |
+| `insufficient_funds` | Payer balance too low |
+| `invalid_exact_evm_transaction_simulation_failed`, `invalid_exact_evm_transaction_failed`, `invalid_exact_evm_transfer_event_mismatch`, `invalid_transaction_state` | Onchain simulation or execution failed |
+| `settlement_pending` | Broadcast but not yet confirmed; retry to reconcile |
+| `unexpected_verify_error`, `unexpected_settle_error` | Internal error |
+
+Facilitator-specific codes:
+
+| Code | Meaning |
+|------|---------|
+| `unsupported_asset` | Asset is not USDC on this network |
+| `amount_below_facilitator_fee` | Amount does not cover `GAS_FEE_USDC` |
+| `amount_above_facilitator_limit` | Amount exceeds `MAX_SETTLEMENT_AMOUNT` |
+| `merchant_not_registered`, `merchant_disabled` | Merchant for this API key cannot receive payments |
+
 ### Admin Endpoints
+
+**`GET /admin/wallet`**
+
+Returns the facilitator's USDC and ETH balances. Requires admin API key.
 
 **`POST /admin/refund`**
 
@@ -369,6 +442,16 @@ Response:
 }
 ```
 
+## HTTP Payment Flow
+
+Between the buyer and the resource server, x402 v2 uses three headers (see the spec's [HTTP transport](https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md)):
+
+1. The resource server replies `402 Payment Required` with a base64-encoded `PaymentRequired` in the `PAYMENT-REQUIRED` header.
+2. The client signs an EIP-3009 authorization and retries with a base64-encoded `PaymentPayload` in the `PAYMENT-SIGNATURE` header.
+3. The resource server calls the facilitator's `/verify` and `/settle`, then returns the content with a base64-encoded `SettleResponse` in the `PAYMENT-RESPONSE` header.
+
+x402 v1 used `X-PAYMENT` and `X-PAYMENT-RESPONSE` instead. The facilitator itself never reads these headers; they only travel between the buyer and the resource server. Use the official SDKs rather than encoding them by hand.
+
 ## Fee Model
 
 ### How Fees Work
@@ -378,20 +461,24 @@ The facilitator collects two types of fees:
 1. **Service Fee**: Percentage of merchant amount (default 0.5%)
 2. **Gas Fee**: Fixed USDC amount to cover transaction costs (default 0.1 USDC)
 
+The price a resource server charges is the gross amount the buyer pays. It must be at least `GAS_FEE_USDC`.
+
 ### Payment Flow
 
 ```
-User pays total amount (merchant amount + fees)
+Buyer signs an authorization for the total amount, payTo = facilitator
   |
   v
-Facilitator receives total
+Facilitator runs transferWithAuthorization to itself
   |
-  +---> Forwards merchant amount to merchant
+  +---> Forwards merchant amount to the merchant tied to the API key
   |
   +---> Keeps service fee + gas fee
 ```
 
 ### Example Calculation
+
+The facilitator splits the gross amount so that `total = merchant + merchant * SERVICE_FEE_BPS / 10000 + GAS_FEE_USDC`. The merchant amount is rounded down and the service fee is the remainder, so the three parts always sum exactly to the total.
 
 For a 1 USDC merchant payment:
 
@@ -403,6 +490,8 @@ Gas Fee:          0.100000 USDC  (fixed)
 Total User Pays:  1.105000 USDC
 ```
 
+For a `$0.50` price (`500000`), the merchant receives `398009`, the service fee is `1991`, and the gas fee is `100000`.
+
 ### Fee Configuration
 
 ```env
@@ -412,18 +501,22 @@ GAS_FEE_USDC=100000       # 0.1 USDC (6 decimals)
 
 ## Network Support
 
+Each facilitator instance settles on exactly one network, selected by `NETWORK`. Run one instance per network.
+
 ### Arbitrum One (Mainnet)
 
-- **Network**: `arbitrum`
+- **Network**: `eip155:42161` (legacy name `arbitrum`)
 - **Chain ID**: 42161
 - **USDC**: `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` (native USDC)
+- **EIP-712 domain**: name `USD Coin`, version `2`
 - **RPC**: `https://arb1.arbitrum.io/rpc`
 
 ### Arbitrum Sepolia (Testnet)
 
-- **Network**: `arbitrum-sepolia`
+- **Network**: `eip155:421614` (legacy name `arbitrum-sepolia`)
 - **Chain ID**: 421614
 - **USDC**: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` (test USDC)
+- **EIP-712 domain**: name `USD Coin`, version `2`
 - **RPC**: `https://sepolia-rollup.arbitrum.io/rpc`
 
 ## Architecture
@@ -492,11 +585,12 @@ The recovery worker runs every 5 minutes (configurable) and:
 - Fee configuration validation
 
 **Payment Validations**
-- EIP-3009 signature verification with domain parameters
-- Timing bounds (validAfter <= now <= validBefore)
-- Nonce uniqueness (PostgreSQL advisory locks)
-- Network, token, and recipient address matching
-- Amount validation (underflow guards, strict equality)
+- EIP-3009 signature verification against the USDC EIP-712 domain (EOA, EIP-1271, EIP-7702)
+- Timing bounds (`validAfter <= now`, `validBefore >= now + 6s`)
+- Nonce uniqueness (PostgreSQL advisory locks plus onchain `authorizationState`)
+- Network, asset, and `payTo` matching
+- Amount validation (exact match, gas fee floor, `MAX_SETTLEMENT_AMOUNT` ceiling)
+- Balance check and transaction simulation
 - Merchant registry check
 
 ## Database
@@ -527,55 +621,6 @@ FROM payments
 GROUP BY status;
 ```
 
-## Client Integration
-
-### Overview
-
-Clients integrate with the facilitator using the facilitator URL. The facilitator's address is provided dynamically through the requirements endpoint, simplifying client implementation and allowing the facilitator to manage the fee model server-side.
-
-### Integration Flow
-
-1. **Fetch Requirements**: Client calls `POST /requirements` with amount and merchant address
-2. **Receive Complete Requirements**: Facilitator returns all necessary fields including its own address as recipient
-3. **Create Permit**: Client creates EIP-3009 permit with facilitator address as spender
-4. **Submit for Verification**: Client submits signed payload to `POST /verify`
-5. **Submit for Settlement**: Authenticated backend calls `POST /settle`
-
-### Example Client Code
-
-```typescript
-const facilitatorUrl = process.env.NEXT_PUBLIC_FACILITATOR_URL;
-
-// Step 1: Fetch requirements (no facilitator address needed)
-const requirements = await fetch(`${facilitatorUrl}/requirements`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    amount: '2500000',
-    memo: 'Order #123',
-    extra: { merchantAddress: '0xMERCH...' }
-  })
-}).then(r => r.json());
-
-// Step 2: Create EIP-3009 permit using requirements.recipient (facilitator address)
-const permit = await createPermit({
-  owner: userAddress,
-  spender: requirements.recipient, // Facilitator address injected here
-  value: requirements.amount,
-  deadline: requirements.deadline,
-  nonce: requirements.nonce,
-});
-
-// Step 3: Verify
-const verification = await fetch(`${facilitatorUrl}/verify`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ ...requirements, permit })
-}).then(r => r.json());
-
-// Step 4: Settle (via backend with merchant API key)
-```
-
 ## Merchant Integration
 
 ### Registration
@@ -585,50 +630,105 @@ const verification = await fetch(`${facilitatorUrl}/verify`, {
 3. Operator adds merchant to database: `pnpm merchants add <address> <name> <hash>`
 4. Merchant receives API key securely
 
-### Creating 402 Responses
+The merchant address registered here is where your share is forwarded. You never put it in `payTo`.
 
-```typescript
-const merchantAmount = 1000000; // 1 USDC
-const serviceFee = Math.floor(merchantAmount * 50 / 10000); // 0.5%
-const gasFee = 100000; // 0.1 USDC
-const totalAmount = merchantAmount + serviceFee + gasFee;
+### Protecting Routes (Resource Server)
 
-const paymentRequirements = {
-  scheme: 'exact',
-  network: 'arbitrum-sepolia',
-  token: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
-  amount: totalAmount.toString(),
-  recipient: '0xFacilitatorAddress', // Facilitator, not merchant
-  merchantAddress: '0xYourMerchantAddress',
-  description: `Content + ${serviceFee/1e6} USDC fee + ${gasFee/1e6} USDC gas`,
-  maxTimeoutSeconds: 300,
-};
+Use the official x402 middleware with `HTTPFacilitatorClient` pointed at this facilitator. Send the API key only on `/settle`, and use the facilitator's signer address from `/supported` as `payTo`. The full runnable version is in [`x402-examples/basic-express`](x402-examples/basic-express/).
 
-res.status(402).json({
-  error: 'Payment Required',
-  paymentRequirements,
-  facilitatorUrl: 'https://facilitator.example.com',
+```javascript
+import express from 'express';
+import { paymentMiddleware, x402ResourceServer } from '@x402/express';
+import { ExactEvmScheme } from '@x402/evm/exact/server';
+import { HTTPFacilitatorClient } from '@x402/core/server';
+
+const FACILITATOR_URL = process.env.FACILITATOR_URL;
+const NETWORK = 'eip155:421614';
+
+const facilitatorClient = new HTTPFacilitatorClient({
+  url: FACILITATOR_URL,
+  // Per-endpoint headers object is required; only /settle needs the key
+  createAuthHeaders: async () => ({
+    verify: {},
+    settle: { 'X-API-Key': process.env.MERCHANT_API_KEY },
+    supported: {},
+  }),
 });
+
+const resourceServer = new x402ResourceServer(facilitatorClient).register(NETWORK, new ExactEvmScheme());
+
+// payTo is the facilitator's signer address (fee split model)
+const supported = await fetch(`${FACILITATOR_URL}/supported`).then((r) => r.json());
+const payTo = supported.signers['eip155:*'][0];
+
+const app = express();
+
+app.use(
+  paymentMiddleware(
+    {
+      'GET /api/premium-content': {
+        accepts: { scheme: 'exact', price: '$0.50', network: NETWORK, payTo },
+        description: 'Access to premium content',
+        mimeType: 'application/json',
+      },
+    },
+    resourceServer,
+  ),
+);
+
+app.get('/api/premium-content', (req, res) => res.json({ data: 'premium' }));
 ```
 
-### Calling Settlement
+For Next.js, `@x402/next` exposes `withX402` and `paymentProxy` with the same resource server setup (see [`x402-examples/nextjs-app`](x402-examples/nextjs-app/)).
+
+### Paying (Client)
+
+Buyers use `@x402/fetch` (or `@x402/axios`), which handles the 402, signs the authorization, and retries with `PAYMENT-SIGNATURE`:
+
+```javascript
+import { wrapFetchWithPaymentFromConfig, decodePaymentResponseHeader } from '@x402/fetch';
+import { ExactEvmScheme } from '@x402/evm';
+import { privateKeyToAccount } from 'viem/accounts';
+
+const account = privateKeyToAccount(process.env.PAYER_PRIVATE_KEY);
+const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, {
+  schemes: [{ network: 'eip155:421614', client: new ExactEvmScheme(account) }],
+});
+
+const response = await fetchWithPayment('http://localhost:3000/api/premium-content');
+const header = response.headers.get('PAYMENT-RESPONSE');
+if (header) {
+  const settlement = decodePaymentResponseHeader(header);
+  console.log(settlement.transaction, settlement.extra?.feeBreakdown);
+}
+```
+
+### Calling the Facilitator Directly
+
+If you are not using the SDK, call `/verify` and `/settle` with the spec body:
 
 ```typescript
 const response = await fetch('https://facilitator.example.com/settle', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'X-API-Key': 'your_merchant_api_key_here',  // Placeholder - use your actual API key
+    'X-API-Key': 'your_merchant_api_key_here',
   },
   body: JSON.stringify({
-    paymentPayload,
-    paymentRequirements,
+    x402Version: 2,
+    paymentPayload,       // decoded from the buyer's PAYMENT-SIGNATURE header
+    paymentRequirements,  // the entry from accepts[] the buyer chose
   }),
 });
 
 const result = await response.json();
-console.log('Settlement:', result.transactionHash);
-console.log('Merchant received:', result.feeBreakdown.merchantAmount);
+if (result.success) {
+  console.log('Payment tx:', result.transaction);
+  console.log('Merchant received:', result.extra.feeBreakdown.merchantAmount);
+  console.log('Forward:', result.extra.forward.status);
+} else if (result.errorReason === 'settlement_pending') {
+  // Retry the same payload with the same key to reconcile
+}
 ```
 
 ## Operations

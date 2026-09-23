@@ -182,7 +182,7 @@ Tracks payment state through the settlement flow.
 | `user_address` | bytea | User's Ethereum address |
 | `merchant_address` | bytea | Merchant's Ethereum address |
 | `token_address` | bytea | USDC contract address |
-| `network` | text | Network (arbitrum, arbitrum-sepolia) |
+| `network` | text | CAIP-2 network id (`eip155:42161`, `eip155:421614`) |
 | `total_amount` | numeric(78,0) | Total amount in base units |
 | `merchant_amount` | numeric(78,0) | Amount merchant receives (excluding fees) |
 | `fee_amount` | numeric(78,0) | Facilitator's fee (service + gas) |

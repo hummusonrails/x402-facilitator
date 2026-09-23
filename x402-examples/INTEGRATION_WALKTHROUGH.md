@@ -5,190 +5,170 @@ A step-by-step guide to integrating x402 payments into your application.
 ## Overview
 
 The x402 payment flow involves three parties:
-1. **User** - Pays with USDC using EIP-3009 signatures
-2. **Merchant** - Your application receiving payment
-3. **Facilitator** - Handles payment settlement, fees, network and token validation
+1. **User**: pays with USDC by signing an EIP-3009 authorization
+2. **Merchant**: your application, the resource server
+3. **Facilitator**: verifies and settles payments, takes its fee, and forwards your share
+
+This walkthrough uses the official x402 v2 SDKs from [x402-foundation/x402](https://github.com/x402-foundation/x402). The runnable version is in [`basic-express`](./basic-express/).
 
 ## Payment Flow
 
 ```
 1. User requests protected resource
    ↓
-2. Server returns 402 with payment requirements
+2. Server returns 402 with a PAYMENT-REQUIRED header (payTo = facilitator)
    ↓
-3. User creates EIP-3009 signature (client-side)
+3. User signs an EIP-3009 authorization (client-side)
    ↓
-4. User submits payment to server
+4. User retries with a PAYMENT-SIGNATURE header
    ↓
-5. Server settles payment with facilitator (backend)
+5. Server verifies and settles with the facilitator (backend, API key on /settle)
    ↓
-6. Facilitator executes on-chain transactions
+6. Facilitator pulls the payment to itself and forwards your share onchain
    ↓
-7. Server returns protected resource
+7. Server returns the resource with a PAYMENT-RESPONSE header
 ```
 
 ## Step-by-Step Implementation
 
-### Step 1: Return 402 with facilitator requirements header
+### Step 1: Connect to the facilitator
 
-When a user requests a protected resource without payment, fetch requirements from the facilitator and forward them in the headers:
+Create an `HTTPFacilitatorClient` that sends your merchant API key only on `/settle`, and read the facilitator's signer address from `GET /supported`. That address is the `payTo` buyers pay; the facilitator forwards your share to the merchant address tied to your API key.
 
 ```javascript
-app.get('/api/premium-content', async (_req, res) => {
-  const requirementsResponse = await fetch(`${process.env.FACILITATOR_URL}/requirements`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      amount: '1000000',
-      extra: {
-        description: 'Premium content access',
-        merchantAddress: process.env.MERCHANT_ADDRESS,
+import { x402ResourceServer } from '@x402/express';
+import { ExactEvmScheme } from '@x402/evm/exact/server';
+import { HTTPFacilitatorClient } from '@x402/core/server';
+
+const FACILITATOR_URL = process.env.FACILITATOR_URL;
+const NETWORK = process.env.NETWORK || 'eip155:421614'; // must match the facilitator
+
+const facilitatorClient = new HTTPFacilitatorClient({
+  url: FACILITATOR_URL,
+  // A per-endpoint object is required; a flat headers object throws
+  createAuthHeaders: async () => ({
+    verify: {},
+    settle: { 'X-API-Key': process.env.MERCHANT_API_KEY },
+    supported: {},
+  }),
+});
+
+const resourceServer = new x402ResourceServer(facilitatorClient).register(NETWORK, new ExactEvmScheme());
+
+const supported = await fetch(`${FACILITATOR_URL}/supported`).then((r) => r.json());
+const payTo = supported.signers['eip155:*'][0];
+```
+
+### Step 2: Protect the route
+
+`paymentMiddleware` returns the 402 with `PAYMENT-REQUIRED`, verifies the `PAYMENT-SIGNATURE` on the retry, runs your handler, then settles and sets `PAYMENT-RESPONSE`.
+
+```javascript
+import express from 'express';
+import { paymentMiddleware } from '@x402/express';
+
+const app = express();
+
+app.use(
+  paymentMiddleware(
+    {
+      'GET /api/premium-content': {
+        accepts: {
+          scheme: 'exact',
+          price: '$0.50', // gross price; must cover the facilitator gas fee (0.10 USDC by default)
+          network: NETWORK,
+          payTo,
+        },
+        description: 'Access to premium content',
+        mimeType: 'application/json',
       },
-    }),
-  });
+    },
+    resourceServer,
+  ),
+);
 
-  const requirements = await requirementsResponse.json();
-  const serialized = JSON.stringify(requirements);
-
-  res.setHeader('PAYMENT-RESPONSE', serialized);
-  res.setHeader('X-PAYMENT-RESPONSE', serialized); // legacy mirror
-  res.status(402).json({
-    error: 'Payment required',
-    facilitatorUrl: process.env.FACILITATOR_URL,
-  });
+app.get('/api/premium-content', (req, res) => {
+  res.json({ title: 'Premium Content', data: 'Your protected content here' });
 });
 ```
 
-### Step 2: Client Creates EIP-3009 Signature
+### Step 3: Client pays
 
-Use the `PAYMENT-RESPONSE` header to populate a V2 client. For Axios:
+`@x402/fetch` handles the 402, signs the authorization, and retries with `PAYMENT-SIGNATURE`. In Node, use a viem local account; in the browser, use the connected wallet (see [`react-client`](./react-client/)).
 
 ```typescript
-import { x402Client, wrapAxiosWithPayment } from '@x402/axios';
-import { registerExactEvmScheme } from '@x402/evm/exact/client';
+import { wrapFetchWithPaymentFromConfig, decodePaymentResponseHeader } from '@x402/fetch';
+import { ExactEvmScheme } from '@x402/evm';
 import { privateKeyToAccount } from 'viem/accounts';
-import axios from 'axios';
 
-const signer = privateKeyToAccount(process.env.NEXT_PUBLIC_EVM_PRIVATE_KEY as `0x${string}`);
-const client = new x402Client();
-registerExactEvmScheme(client, { signer });
+const account = privateKeyToAccount(process.env.PAYER_PRIVATE_KEY as `0x${string}`);
+const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, {
+  schemes: [{ network: 'eip155:421614', client: new ExactEvmScheme(account) }],
+});
 
-const api = wrapAxiosWithPayment(
-  axios.create({ baseURL: '/api' }),
-  client,
-);
-
-// Calling your protected endpoint will trigger payment handling automatically
-await api.get('/api/premium-content');
+const response = await fetchWithPayment('http://localhost:3000/api/premium-content');
+console.log(await response.json());
 ```
 
-### Step 3: Submit Payment to Your Backend
+### Step 4: Read the settlement
 
-Client sends the signed payment to your server:
+The `PAYMENT-RESPONSE` header carries the facilitator's settle response:
 
 ```typescript
-async function submitPayment(payment: Payment) {
-  const response = await fetch('/api/premium-content', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payment),
-  });
-
-  if (!response.ok) {
-    throw new Error('Payment failed');
-  }
-
-  return await response.json();
+const header = response.headers.get('PAYMENT-RESPONSE');
+if (header) {
+  const settlement = decodePaymentResponseHeader(header);
+  // extra is facilitator-specific, typed as Record<string, unknown> by the SDK
+  const extra = settlement.extra as {
+    feeBreakdown: { merchantAmount: string };
+    forward: { status: 'complete' | 'pending'; transaction?: string };
+  };
+  console.log('Payment tx:', settlement.transaction);
+  console.log('Your share:', extra.feeBreakdown.merchantAmount);
+  console.log('Forward status:', extra.forward.status); // "complete" or "pending"
 }
 ```
 
-### Step 4: Backend Settles with Facilitator
-
-Your server settles the payment (never expose API key to client). Accept payloads from body or `PAYMENT-SIGNATURE` header:
-
-```javascript
-app.post('/api/premium-content', async (req, res) => {
-  const parsed = req.body?.paymentPayload ? req.body : JSON.parse(req.header('PAYMENT-SIGNATURE') || '{}');
-  const { paymentPayload, paymentRequirements } = parsed || {};
-
-  try {
-    const settlementResponse = await fetch(`${FACILITATOR_URL}/settle`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': MERCHANT_API_KEY,
-      },
-      body: JSON.stringify({
-        paymentPayload,
-        paymentRequirements,
-      }),
-    });
-
-    const result = await settlementResponse.json();
-
-    if (!result.success) {
-      return res.status(400).json({ error: result.error });
-    }
-
-    res.json({
-      success: true,
-      content: {
-        title: 'Premium Content',
-        data: 'Your protected content here',
-      },
-      payment: {
-        transactionHash: result.outgoingTransactionHash,
-        blockNumber: result.blockNumber,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-```
+`forward.status: "pending"` means the buyer's payment landed and the facilitator's recovery worker will finish forwarding your share.
 
 ## Security Best Practices
 
 ### 1. Never Expose API Key
 
 ```javascript
-// WRONG: Never do this
+// WRONG: Never do this in client code
 const apiKey = 'your-api-key';
 fetch('/settle', {
   headers: { 'X-API-Key': apiKey }
 });
 
 // CORRECT: API key stays on server
-// Client calls your backend, backend calls facilitator
+// The SDK sends it from your backend, and only on /settle
 ```
 
-### 2. Validate Payment Requirements
+### 2. Use the facilitator as payTo
 
-```javascript
-// Verify the payment matches your expected amount
-if (paymentRequirements.amount !== EXPECTED_AMOUNT) {
-  throw new Error('Invalid payment amount');
-}
-
-// Verify merchant address matches yours
-if (paymentRequirements.merchantAddress !== YOUR_ADDRESS) {
-  throw new Error('Invalid merchant address');
-}
-```
+`payTo` must be the facilitator's signer address from `GET /supported`. Using your own address fails with `invalid_exact_evm_recipient_mismatch`. Your merchant address is determined by your API key, so a buyer cannot redirect your share.
 
 ### 3. Handle Errors Gracefully
 
+When settlement fails, the middleware does not deliver the content. If you call the facilitator yourself, branch on `errorReason`:
+
 ```javascript
-try {
-  const result = await settlePayment(payment);
-  // Success
-} catch (error) {
-  if (error.message.includes('Nonce already used')) {
-    // Payment already processed
-  } else if (error.message.includes('Insufficient balance')) {
-    // User doesn't have enough USDC
-  } else {
-    // Other error
+const result = await settleResponse.json();
+if (!result.success) {
+  switch (result.errorReason) {
+    case 'settlement_pending':
+      // Broadcast but unconfirmed: retry the same payload with the same key to reconcile
+      break;
+    case 'invalid_exact_evm_nonce_already_used':
+      // Payment already processed
+      break;
+    case 'insufficient_funds':
+      // User doesn't have enough USDC
+      break;
+    default:
+      // Other error; see the README error code table
   }
 }
 ```
@@ -198,35 +178,42 @@ try {
 ### 1. Get Test USDC
 
 On Arbitrum Sepolia:
-1. Get ETH from [Arbitrum Sepolia faucet](https://faucet.quicknode.com/arbitrum/sepolia)
-2. Get test USDC from Circle's faucet or bridge
+1. Get test USDC from Circle's faucet or bridge
+2. The buyer does not need ETH: the facilitator pays gas and recovers it through its gas fee
 
 ### 2. Test Payment Flow
 
 ```bash
 # 1. Start facilitator
 cd facilitator
+pnpm dev
+
+# 2. Start the example server
+cd x402-examples/basic-express
 npm start
 
-# 2. Start your backend
-cd your-app
-npm start
-
-# 3. Open frontend and test payment
+# 3. Pay for the protected route
+npm run client
 ```
 
 ## Common Issues
 
-### Issue: Nonce already used
-**Solution:** Each payment needs a unique nonce. Generate a new random nonce for each payment.
+### Issue: `invalid_exact_evm_nonce_already_used`
+**Solution:** The authorization was already used. The SDK generates a fresh nonce per payment; don't replay old payloads.
 
-### Issue: Invalid signature
-**Solution:** Ensure you're signing with the correct EIP-712 domain and types for USDC.
+### Issue: `invalid_exact_evm_signature`
+**Solution:** Ensure requirements include `extra.name: "USD Coin"` and `extra.version: "2"`, and the client signs for the facilitator's network.
+
+### Issue: `invalid_exact_evm_recipient_mismatch`
+**Solution:** Use the facilitator's signer address from `GET /supported` as `payTo`.
+
+### Issue: `amount_below_facilitator_fee`
+**Solution:** Set a price above the facilitator's gas fee (0.10 USDC by default).
 
 ### Issue: Merchant not approved
 **Solution:** Wait for admin approval after merchant registration.
 
-### Issue: Insufficient balance
+### Issue: `insufficient_funds`
 **Solution:** User needs USDC in their wallet on Arbitrum Sepolia.
 
 ## Next Steps
