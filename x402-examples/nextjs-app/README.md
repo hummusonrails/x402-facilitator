@@ -1,14 +1,18 @@
 # Next.js Integration Example
 
-A full-stack Next.js application with x402 payment integration (CAIP-2 networks, header-based requirements).
+A Next.js 16 app (App Router, React 19, TypeScript) whose API route is paid with x402 v2 and settled through the Arbitrum facilitator, using `@x402/next` from [x402-foundation/x402](https://github.com/x402-foundation/x402).
 
 ## Features
 
-- Next.js 14 with App Router
-- Client-side payment creation with viem
-- Server-side payment settlement
-- TypeScript support
-- Tailwind CSS styling
+- `withX402` route wrapper from `@x402/next`: verifies before your handler runs and settles only if it returns a status below 400
+- `HTTPFacilitatorClient` sending the merchant API key only on `/settle`
+- `payTo` read from the facilitator's `GET /supported` on the first paid request, then cached
+
+## Requirements
+
+- Node.js 20.9 or later
+- Next.js 16.2.6 or later (required by `@x402/next`)
+- A running facilitator and a merchant API key
 
 ## Setup
 
@@ -24,16 +28,18 @@ cp .env.example .env.local
 
 Edit `.env.local`:
 ```env
-NEXT_PUBLIC_FACILITATOR_URL=http://localhost:3002
+FACILITATOR_URL=http://localhost:3002
 MERCHANT_API_KEY=your_api_key_here
-MERCHANT_ADDRESS=0xYourMerchantAddress
-# Optional: private key for local testing with @x402 clients
-# NEXT_PUBLIC_EVM_PRIVATE_KEY=0x...
+# Must match the facilitator's NETWORK
+NETWORK=eip155:421614
 ```
 
-3. Start development server:
+These are server-only values. Never prefix the API key with `NEXT_PUBLIC_`.
+
+3. Start the app:
 ```bash
 npm run dev
+# or: npm run build && npm start
 ```
 
 ## Project Structure
@@ -41,48 +47,98 @@ npm run dev
 ```
 nextjs-app/
 ├── app/
-│   ├── api/
-│   │   └── settle/
-│   │       └── route.ts      # Settlement API route
-│   ├── page.tsx              # Home page with payment demo
-│   └── layout.tsx
-├── components/
-│   └── PaymentButton.tsx    # Payment component
-├── lib/
-│   └── payment.ts            # Payment utilities
-└── package.json
+│   ├── api/premium-content/route.ts   # Paid route wrapped with withX402
+│   ├── layout.tsx
+│   └── page.tsx
+├── lib/x402.ts                        # Facilitator client, resource server, payTo lookup
+├── next.config.ts
+├── tsconfig.json
+└── .env.example
 ```
+
+## Code
+
+### `lib/x402.ts`
+
+```typescript
+import { x402ResourceServer } from '@x402/next';
+import type { Network } from '@x402/next';
+import { HTTPFacilitatorClient } from '@x402/core/server';
+import { ExactEvmScheme } from '@x402/evm/exact/server';
+
+const FACILITATOR_URL = process.env.FACILITATOR_URL ?? 'http://localhost:3002';
+export const NETWORK = (process.env.NETWORK ?? 'eip155:421614') as Network;
+
+const facilitatorClient = new HTTPFacilitatorClient({
+  url: FACILITATOR_URL,
+  // Keyed by facilitator endpoint; only /settle needs the merchant API key
+  createAuthHeaders: async () => ({
+    verify: {},
+    settle: { 'X-API-Key': process.env.MERCHANT_API_KEY ?? '' },
+    supported: {},
+  }),
+});
+
+export const server = new x402ResourceServer(facilitatorClient).register(NETWORK, new ExactEvmScheme());
+```
+
+The file also exports `facilitatorPayTo()`, which reads `signers["eip155:*"][0]` from `GET /supported` and caches it. Buyers pay that facilitator address, and the facilitator forwards your share to the merchant address tied to your API key.
+
+### `app/api/premium-content/route.ts`
+
+```typescript
+import { NextResponse } from 'next/server';
+import { withX402 } from '@x402/next';
+import { server, NETWORK, facilitatorPayTo } from '@/lib/x402';
+
+async function handler() {
+  return NextResponse.json({
+    title: 'Premium Content',
+    body: 'This is the premium content you paid for!',
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export const GET = withX402(
+  handler,
+  {
+    accepts: {
+      scheme: 'exact',
+      // Must cover the facilitator's fixed gas fee (0.10 USDC by default)
+      price: '$0.50',
+      network: NETWORK,
+      payTo: facilitatorPayTo,
+    },
+    description: 'Access to premium content',
+    mimeType: 'application/json',
+  },
+  server,
+);
+```
+
+To protect pages instead of API routes, use `paymentProxy` from `@x402/next` in `proxy.ts` with the same `server` (see the [`@x402/next` README](https://github.com/x402-foundation/x402/tree/main/typescript/packages/http/next)).
 
 ## Usage Flow
 
-1. User clicks "Purchase Content"
-2. Client fetches payment requirements from facilitator (POST /requirements) and reads them from the `PAYMENT-RESPONSE` header (mirrored to `X-PAYMENT-RESPONSE` for legacy tools)
-3. Facilitator issues requirements with its own address as `payTo` and CAIP-2 `network` (e.g., `eip155:421614`)
-4. Client creates EIP-3009 signature using MetaMask
-5. Client sends signed payload to backend API route (body or `PAYMENT-SIGNATURE` header)
-6. Backend verifies and settles payment with facilitator
-7. Facilitator receives funds, forwards merchant net amount
-8. Content is unlocked for user
-
-## Integration Pattern
-
-This example demonstrates x402 integration where:
-- Client only needs facilitator URL
-- Facilitator address provided dynamically
-- Requirements fetched from the facilitator
-- Fee model enforced server-side
+1. A client requests `/api/premium-content` without payment
+2. `withX402` responds `402` with a base64 `PaymentRequired` in the `PAYMENT-REQUIRED` header (`payTo` is the facilitator, `network` is CAIP-2, for example `eip155:421614`)
+3. The client signs an EIP-3009 authorization and retries with `PAYMENT-SIGNATURE` (`@x402/fetch` does this automatically)
+4. `withX402` verifies with the facilitator and runs your handler
+5. On a successful response it settles with the facilitator using your API key
+6. The facilitator receives the funds and forwards your net amount
+7. The response carries the settlement result in the `PAYMENT-RESPONSE` header
 
 ## Testing
 
-1. Connect MetaMask to Arbitrum Sepolia (`eip155:421614`)
-2. Get test USDC from faucet
-3. Approve USDC spending
-4. Click payment button
-5. Sign the EIP-3009 authorization
-6. View unlocked content
+1. Start the facilitator with `NETWORK=eip155:421614`
+2. Run `npm run dev`
+3. `curl -i http://localhost:3000/api/premium-content` returns 402 with `PAYMENT-REQUIRED`
+4. Pay with the `basic-express` example's client: `RESOURCE_URL=http://localhost:3000/api/premium-content npm run client`
+
+`withX402` fetches the facilitator's supported kinds when the route loads. If the facilitator is unreachable at that moment (including during `next build`), it logs `Failed to fetch supported kinds from facilitator` and paid requests return 500 until the facilitator is reachable; it recovers on its own without a restart.
 
 ## Learn More
 
 - [Next.js Documentation](https://nextjs.org/docs)
-- [viem Documentation](https://viem.sh)
+- [`@x402/next` README](https://github.com/x402-foundation/x402/tree/main/typescript/packages/http/next)
 - [X402 Integration Guide](../../docs/INTEGRATION_GUIDE.md)

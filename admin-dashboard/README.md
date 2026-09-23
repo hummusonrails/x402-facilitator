@@ -145,7 +145,7 @@ server {
 ## Development
 
 The dashboard is built with:
-- Next.js 14 (App Router)
+- Next.js 16 (App Router), React 19
 - React 18
 - TypeScript
 - PostgreSQL (via pg)

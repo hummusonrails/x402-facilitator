@@ -1,394 +1,272 @@
-import { createWalletClient, createPublicClient, http, WalletClient, PublicClient } from 'viem';
-import { Address } from 'viem';
+import { parseEventLogs, parseAbi, type Address, type Hex } from 'viem';
+import { config, SETTLEMENT_CONFIRMATION_TIMEOUT_MS } from './config.js';
+import { publicClient, walletClient, facilitatorAccount, USDC_ABI, splitEcdsaSignature } from './clients.js';
 import { verifyPayment } from './verify.js';
-import { config, SERVICE_FEE_BPS, GAS_FEE_USDC, MAX_SETTLEMENT_AMOUNT } from './config.js';
-import { setStatus, logPaymentEvent } from './nonceStore.js';
+import { computeFeeSplit, type FeeSplit } from './fees.js';
+import { createIfAbsent, getPayment, setStatus, logPaymentEvent } from './nonceStore.js';
 import { isDatabaseConfigured } from './db.js';
 import { getMerchantByAddress } from './merchantStore.js';
-import type { SettleRequest, SettleResponse } from './types.js';
+import type { NormalizedPayment, SettleResponse } from './types.js';
+import * as Errors from './errors.js';
 import { Logger } from './logging.js';
-import { privateKeyToAccount } from 'viem/accounts';
-import { FACILITATOR_PRIVATE_KEY } from './config.js';
 
 const useDatabase = isDatabaseConfigured();
 
-const usedNonces = new Set<string>();
+const TRANSFER_EVENT_ABI = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 
-export function markNonceAsUsed(nonce: string): void {
-  usedNonces.add(nonce);
-}
+// In-memory fallbacks when no database is configured (not safe across restarts or replicas)
+const claimedNonces = new Set<string>();
+const pendingIncoming = new Map<string, { hash: Hex; merchantAddress: string; totalAmount: bigint }>();
 
-const TRANSFER_WITH_AUTHORIZATION_ABI = [
-  {
-    name: 'transferWithAuthorization',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'from', type: 'address' },
-      { name: 'to', type: 'address' },
-      { name: 'value', type: 'uint256' },
-      { name: 'validAfter', type: 'uint256' },
-      { name: 'validBefore', type: 'uint256' },
-      { name: 'nonce', type: 'bytes32' },
-      { name: 'v', type: 'uint8' },
-      { name: 'r', type: 'bytes32' },
-      { name: 's', type: 'bytes32' },
-    ],
-    outputs: [],
-  },
-] as const;
-
-let walletClient: WalletClient | null = null;
-let publicClient: PublicClient | null = null;
-
-const facilitatorAccount = privateKeyToAccount(FACILITATOR_PRIVATE_KEY);
-
-function getWalletClient() {
-  if (!walletClient) {
-    walletClient = createWalletClient({
-      account: facilitatorAccount,
-      chain: config.chain,
-      transport: http(config.rpcUrl),
-    });
-  }
-  return walletClient;
-}
-
-function getPublicClient() {
-  if (!publicClient) {
-    publicClient = createPublicClient({
-      chain: config.chain,
-      transport: http(config.rpcUrl),
-    });
-  }
-  return publicClient;
-}
-
-function calculateFees(merchantAmount: bigint) {
-  // Service fee = merchantAmount * SERVICE_FEE_BPS / 10000
-  const serviceFee = (merchantAmount * BigInt(SERVICE_FEE_BPS)) / 10000n;
-  const gasFee = GAS_FEE_USDC;
-  const totalAmount = merchantAmount + serviceFee + gasFee;
-  
+function failure(payer: string, errorReason: string, errorMessage?: string, transaction = ''): SettleResponse {
   return {
-    merchantAmount,
-    serviceFee,
-    gasFee,
-    totalAmount,
-    facilitatorFee: serviceFee + gasFee,
+    success: false,
+    errorReason,
+    ...(errorMessage && { errorMessage }),
+    payer,
+    transaction,
+    network: config.network,
   };
 }
 
-export async function settlePayment(
-  request: SettleRequest,
-  merchantAddress: Address,
-  logger: Logger
-): Promise<SettleResponse> {
-  const { paymentPayload, paymentRequirements } = request;
+async function recordStatus(nonce: string, status: Parameters<typeof setStatus>[1], hashes?: Parameters<typeof setStatus>[2], event?: Record<string, any>) {
+  if (!useDatabase) return;
+  await setStatus(nonce, status, hashes);
+  await logPaymentEvent(nonce, status, event);
+}
 
-  logger.info('Starting payment settlement');
+async function submitIncomingTransfer(payment: NormalizedPayment): Promise<Hex> {
+  const { authorization: auth, signature } = payment;
+  const vrs = splitEcdsaSignature(signature);
+  const base = [auth.from, facilitatorAccount.address, auth.value, auth.validAfter, auth.validBefore, auth.nonce] as const;
 
-  const verificationResult = await verifyPayment(
-    { paymentPayload, paymentRequirements },
-    facilitatorAccount.address,
-    merchantAddress,
-    logger
-  );
-
-  if (!verificationResult.valid) {
-    logger.warn('Settlement failed: verification failed', {
-      reason: verificationResult.invalidReason,
-    });
-    return {
-      success: false,
-      error: verificationResult.invalidReason || 'Payment verification failed',
-    };
-  }
-
-  const requestedToken = paymentRequirements.token.toLowerCase();
-  const configuredToken = config.usdcAddress.toLowerCase();
-
-  if (requestedToken !== configuredToken) {
-    logger.error('Token mismatch in settle', { requested: requestedToken, configured: configuredToken });
-    return {
-      success: false,
-      error: `Invalid token address. Only ${config.usdcAddress} is supported.`,
-    };
-  }
-
-  const merchant = await getMerchantByAddress(merchantAddress);
-  
-  if (!merchant) {
-    logger.warn('Merchant not registered', { merchantAddress });
-    return {
-      success: false,
-      error: 'Merchant not registered',
-    };
-  }
-  
-  if (!merchant.enabled) {
-    logger.warn('Merchant disabled', { merchantAddress });
-    return {
-      success: false,
-      error: 'Merchant account disabled',
-    };
-  }
-
-  const totalAmount = BigInt(paymentRequirements.amount);
-  
-  // Guard against underflow: total must be at least gas fee
-  if (totalAmount < GAS_FEE_USDC) {
-    logger.error('Amount less than gas fee', {
-      totalAmount: totalAmount.toString(),
-      gasFee: GAS_FEE_USDC.toString(),
-    });
-    return {
-      success: false,
-      error: `Amount ${totalAmount} is less than fixed gas fee ${GAS_FEE_USDC}`,
-    };
-  }
-  
-  const totalMinusGas = totalAmount - GAS_FEE_USDC;
-  const feeMultiplier = 10000n + BigInt(SERVICE_FEE_BPS);
-  const merchantAmount = (totalMinusGas * 10000n) / feeMultiplier;
-  
-  const fees = calculateFees(merchantAmount);
-  
-  if (fees.totalAmount !== totalAmount) {
-    logger.error('Amount calculation mismatch - rejecting', {
-      expected: fees.totalAmount.toString(),
-      received: totalAmount.toString(),
-      merchantAmount: fees.merchantAmount.toString(),
-      serviceFee: fees.serviceFee.toString(),
-      gasFee: fees.gasFee.toString(),
-    });
-    return {
-      success: false,
-      error: `Amount mismatch: expected ${fees.totalAmount}, got ${totalAmount}. Fee calculation error.`,
-    };
-  }
-
-  if (fees.totalAmount.toString() !== paymentPayload.payload.value) {
-    logger.error('Payload value does not match computed total', {
-      computedTotal: fees.totalAmount.toString(),
-      payloadValue: paymentPayload.payload.value,
-    });
-    return {
-      success: false,
-      error: `Payload value ${paymentPayload.payload.value} does not match computed total ${fees.totalAmount}`,
-    };
-  }
-
-  logger.info('Fee breakdown', {
-    merchantAmount: fees.merchantAmount.toString(),
-    serviceFee: fees.serviceFee.toString(),
-    gasFee: fees.gasFee.toString(),
-    facilitatorFee: fees.facilitatorFee.toString(),
-    totalAmount: fees.totalAmount.toString(),
-  });
-
-  if (fees.totalAmount > MAX_SETTLEMENT_AMOUNT) {
-    logger.warn('Amount exceeds maximum', {
-      amount: fees.totalAmount.toString(),
-      max: MAX_SETTLEMENT_AMOUNT.toString(),
-    });
-    return {
-      success: false,
-      error: `Amount exceeds maximum limit of ${MAX_SETTLEMENT_AMOUNT}`,
-    };
-  }
-
-  const walletClient = getWalletClient();
-  const publicClient = getPublicClient();
-
-  try {
-    logger.info('Submitting settlement transaction with fee split', {
-      method: 'transferWithAuthorization + transfer',
-      from: paymentPayload.payload.from,
-      toFacilitator: facilitatorAccount.address,
-      totalAmount: fees.totalAmount.toString(),
-      willForwardToMerchant: merchantAddress,
-      merchantAmount: fees.merchantAmount.toString(),
-      facilitatorFee: fees.facilitatorFee.toString(),
-      token: config.usdcAddress,
-    });
-
-    const incomingHash = await walletClient.writeContract({
+  if (vrs) {
+    return walletClient.writeContract({
       address: config.usdcAddress as Address,
-      abi: TRANSFER_WITH_AUTHORIZATION_ABI,
+      abi: USDC_ABI,
       functionName: 'transferWithAuthorization',
       account: facilitatorAccount,
       chain: config.chain,
-      args: [
-        paymentPayload.payload.from as Address,
-        facilitatorAccount.address, // Facilitator receives the total
-        fees.totalAmount,
-        BigInt(paymentPayload.payload.validAfter),
-        BigInt(paymentPayload.payload.validBefore),
-        paymentPayload.payload.nonce as `0x${string}`,
-        paymentPayload.payload.v,
-        paymentPayload.payload.r as `0x${string}`,
-        paymentPayload.payload.s as `0x${string}`,
-      ],
+      args: [...base, vrs.v, vrs.r, vrs.s],
     });
+  }
+  return walletClient.writeContract({
+    address: config.usdcAddress as Address,
+    abi: USDC_ABI,
+    functionName: 'transferWithAuthorization',
+    account: facilitatorAccount,
+    chain: config.chain,
+    args: [...base, signature],
+  });
+}
 
-    logger.info('Incoming transfer submitted', { hash: incomingHash });
+/**
+ * Wait for the payer's transfer to confirm, then forward the merchant share.
+ * Shared by the normal path and the settlement_pending reconciliation path.
+ */
+async function completeSettlement(
+  payment: NormalizedPayment,
+  incomingHash: Hex,
+  merchantAddress: Address,
+  fees: FeeSplit,
+  logger: Logger
+): Promise<SettleResponse> {
+  const payer = payment.authorization.from;
+  const nonce = payment.authorization.nonce;
 
-    if (useDatabase) {
-      await setStatus(paymentPayload.payload.nonce, 'incoming_submitted', {
-        incomingTxHash: incomingHash,
-      });
-      await logPaymentEvent(paymentPayload.payload.nonce, 'incoming_submitted', {
-        txHash: incomingHash,
-      });
-    }
-
-    const incomingReceipt = await publicClient.waitForTransactionReceipt({ 
+  let incomingReceipt;
+  try {
+    incomingReceipt = await publicClient.waitForTransactionReceipt({
       hash: incomingHash,
       confirmations: 1,
+      timeout: SETTLEMENT_CONFIRMATION_TIMEOUT_MS,
     });
+  } catch (error: any) {
+    // Broadcast succeeded but confirmation is unknown. Non-terminal: the caller may
+    // retry with the same payload, which reconciles against this transaction.
+    logger.warn('Receipt wait failed, settlement pending', { hash: incomingHash, error: error.message });
+    if (!useDatabase) pendingIncoming.set(nonce, { hash: incomingHash, merchantAddress, totalAmount: fees.totalAmount });
+    return failure(payer, Errors.ErrSettlementPending, error.shortMessage || error.message, incomingHash);
+  }
+  pendingIncoming.delete(nonce);
 
-    if (incomingReceipt.status !== 'success') {
-      logger.error('Incoming transfer failed', { receipt: incomingReceipt });
-      
-      if (useDatabase) {
-        await setStatus(paymentPayload.payload.nonce, 'failed');
-        await logPaymentEvent(paymentPayload.payload.nonce, 'incoming_failed', {
-          txHash: incomingHash,
-          blockNumber: incomingReceipt.blockNumber.toString(),
-        });
-      }
-      
-      return {
-        success: false,
-        error: 'Incoming transfer transaction reverted',
-      };
-    }
+  if (incomingReceipt.status !== 'success') {
+    logger.error('Incoming transfer reverted', { hash: incomingHash });
+    await recordStatus(nonce, 'failed', undefined, { txHash: incomingHash, blockNumber: incomingReceipt.blockNumber.toString() });
+    return failure(payer, Errors.ErrTransactionFailed, 'transferWithAuthorization reverted', incomingHash);
+  }
 
-    logger.info('Incoming transfer confirmed', {
-      hash: incomingReceipt.transactionHash,
-      blockNumber: incomingReceipt.blockNumber.toString(),
-    });
+  // A successful receipt only proves no revert; require the expected USDC Transfer event
+  const auth = payment.authorization;
+  const transferred = parseEventLogs({ abi: TRANSFER_EVENT_ABI, logs: incomingReceipt.logs, eventName: 'Transfer' }).some(
+    (log) =>
+      log.address.toLowerCase() === config.usdcAddress.toLowerCase() &&
+      log.args.from.toLowerCase() === auth.from.toLowerCase() &&
+      log.args.to.toLowerCase() === facilitatorAccount.address.toLowerCase() &&
+      log.args.value === auth.value
+  );
+  if (!transferred) {
+    logger.error('Incoming transfer event mismatch', { hash: incomingHash });
+    await recordStatus(nonce, 'failed', undefined, { txHash: incomingHash, note: 'transfer event mismatch' });
+    return failure(payer, Errors.ErrTransferEventMismatch, undefined, incomingHash);
+  }
 
-    if (useDatabase) {
-      await setStatus(paymentPayload.payload.nonce, 'incoming_complete');
-      await logPaymentEvent(paymentPayload.payload.nonce, 'incoming_complete', {
-        txHash: incomingHash,
-        blockNumber: incomingReceipt.blockNumber.toString(),
-      });
-    }
+  logger.info('Incoming transfer confirmed', { hash: incomingHash, blockNumber: incomingReceipt.blockNumber.toString() });
+  await recordStatus(nonce, 'incoming_complete', undefined, { txHash: incomingHash, blockNumber: incomingReceipt.blockNumber.toString() });
 
-    const transferAbi = [{
-      name: 'transfer',
-      type: 'function',
-      stateMutability: 'nonpayable',
-      inputs: [
-        { name: 'to', type: 'address' },
-        { name: 'value', type: 'uint256' },
-      ],
-      outputs: [{ name: '', type: 'bool' }],
-    }] as const;
-
+  // The payer's payment has landed at payTo, so settlement has succeeded from the
+  // protocol's point of view. Forwarding to the merchant is facilitator bookkeeping;
+  // if it fails the recovery worker retries it from the incoming_complete state.
+  let forward: { status: 'complete' | 'pending'; transaction?: Hex } = { status: 'pending' };
+  try {
     const outgoingHash = await walletClient.writeContract({
       address: config.usdcAddress as Address,
-      abi: transferAbi,
+      abi: USDC_ABI,
       functionName: 'transfer',
       account: facilitatorAccount,
       chain: config.chain,
-      args: [
-        merchantAddress,
-        fees.merchantAmount,
-      ],
+      args: [merchantAddress, fees.merchantAmount],
     });
+    forward = { status: 'pending', transaction: outgoingHash };
+    await recordStatus(nonce, 'outgoing_submitted', { outgoingTxHash: outgoingHash }, { txHash: outgoingHash });
 
-    logger.info('Outgoing transfer to merchant submitted', { hash: outgoingHash });
-
-    if (useDatabase) {
-      await setStatus(paymentPayload.payload.nonce, 'outgoing_submitted', {
-        outgoingTxHash: outgoingHash,
-      });
-      await logPaymentEvent(paymentPayload.payload.nonce, 'outgoing_submitted', {
-        txHash: outgoingHash,
-      });
-    }
-
-    const outgoingReceipt = await publicClient.waitForTransactionReceipt({ 
-      hash: outgoingHash,
-      confirmations: 1,
-    });
-
-    if (outgoingReceipt.status !== 'success') {
-      logger.error('Outgoing transfer to merchant failed', { receipt: outgoingReceipt });
-      
-      if (useDatabase) {
-        await setStatus(paymentPayload.payload.nonce, 'failed');
-        await logPaymentEvent(paymentPayload.payload.nonce, 'outgoing_failed', {
-          txHash: outgoingHash,
-          blockNumber: outgoingReceipt.blockNumber.toString(),
-          note: 'Funds received but not forwarded to merchant',
-        });
-      }
-      
-      return {
-        success: false,
-        error: 'Outgoing transfer to merchant reverted',
-      };
-    }
-
-    logger.info('Outgoing transfer confirmed - settlement complete', {
-      incomingHash: incomingReceipt.transactionHash,
-      outgoingHash: outgoingReceipt.transactionHash,
-      blockNumber: outgoingReceipt.blockNumber.toString(),
-      merchantAmount: fees.merchantAmount.toString(),
-      facilitatorFee: fees.facilitatorFee.toString(),
-    });
-
-    if (useDatabase) {
-      await setStatus(paymentPayload.payload.nonce, 'complete');
-      await logPaymentEvent(paymentPayload.payload.nonce, 'complete', {
+    const outgoingReceipt = await publicClient.waitForTransactionReceipt({ hash: outgoingHash, confirmations: 1 });
+    if (outgoingReceipt.status === 'success') {
+      forward = { status: 'complete', transaction: outgoingHash };
+      await recordStatus(nonce, 'complete', undefined, {
         incomingTxHash: incomingHash,
         outgoingTxHash: outgoingHash,
-        incomingBlock: incomingReceipt.blockNumber.toString(),
-        outgoingBlock: outgoingReceipt.blockNumber.toString(),
         merchantAmount: fees.merchantAmount.toString(),
         facilitatorFee: fees.facilitatorFee.toString(),
       });
     } else {
-      markNonceAsUsed(paymentPayload.payload.nonce);
+      logger.error('Forward to merchant reverted, leaving for recovery', { hash: outgoingHash });
+      await recordStatus(nonce, 'incoming_complete', undefined, { note: 'forward reverted', txHash: outgoingHash });
     }
+  } catch (error: any) {
+    logger.error('Forward to merchant failed, leaving for recovery', { error: error.message });
+  }
 
-    return {
-      success: true,
-      txHash: outgoingReceipt.transactionHash,
-      meta: {
-        journalId: paymentPayload.payload.nonce,
-        grossAmount: fees.totalAmount.toString(),
-        feeAmount: fees.facilitatorFee.toString(),
-        merchantNet: fees.merchantAmount.toString(),
-        forwardTxHash: outgoingReceipt.transactionHash,
-        incomingTxHash: incomingReceipt.transactionHash,
-        outgoingTxHash: outgoingReceipt.transactionHash,
-        blockNumber: Number(outgoingReceipt.blockNumber),
-        status: 'FORWARDED',
-      },
-      transactionHash: outgoingReceipt.transactionHash,
-      incomingTransactionHash: incomingReceipt.transactionHash,
-      outgoingTransactionHash: outgoingReceipt.transactionHash,
-      blockNumber: Number(outgoingReceipt.blockNumber),
-      status: 'confirmed' as const,
-      merchantAddress: merchantAddress,
+  logger.info('Settlement complete', { incomingHash, forward });
+
+  return {
+    success: true,
+    payer,
+    transaction: incomingHash,
+    network: config.network,
+    amount: fees.totalAmount.toString(),
+    extra: {
+      merchantAddress,
+      forward,
       feeBreakdown: {
         merchantAmount: fees.merchantAmount.toString(),
         serviceFee: fees.serviceFee.toString(),
         gasFee: fees.gasFee.toString(),
         totalAmount: fees.totalAmount.toString(),
       },
-    };
-  } catch (error: any) {
-    logger.error('Settlement transaction failed', { error: error.message });
-    return {
-      success: false,
-      error: `Settlement failed: ${error.message}`,
-    };
+    },
+  };
+}
+
+export async function settlePayment(
+  payment: NormalizedPayment,
+  merchantAddress: Address,
+  logger: Logger
+): Promise<SettleResponse> {
+  const payer = payment.authorization.from;
+  const nonce = payment.authorization.nonce;
+
+  logger.info('Starting payment settlement');
+
+  const merchant = await getMerchantByAddress(merchantAddress);
+  if (!merchant) {
+    return failure(payer, Errors.ErrMerchantNotRegistered);
   }
+  if (!merchant.enabled) {
+    return failure(payer, Errors.ErrMerchantDisabled);
+  }
+
+  // Retry of a settle that previously returned settlement_pending: reconcile
+  // against the transaction already broadcast instead of submitting again.
+  // Only the merchant that started the settlement, for the same amount, may reconcile it.
+  const existing = useDatabase ? await getPayment(nonce) : null;
+  const pending = existing
+    ? existing.status === 'incoming_submitted' && existing.incomingTxHash
+      ? { hash: existing.incomingTxHash as Hex, merchantAddress: existing.merchantAddress, totalAmount: BigInt(existing.totalAmount) }
+      : undefined
+    : pendingIncoming.get(nonce);
+  if (pending) {
+    const fees = computeFeeSplit(payment.authorization.value);
+    if (
+      !fees ||
+      pending.merchantAddress.toLowerCase() !== merchantAddress.toLowerCase() ||
+      pending.totalAmount !== fees.totalAmount ||
+      (existing && existing.userAddress.toLowerCase() !== payer.toLowerCase())
+    ) {
+      return failure(payer, Errors.ErrNonceAlreadyUsed);
+    }
+    logger.info('Reconciling pending settlement', { hash: pending.hash });
+    return completeSettlement(payment, pending.hash, merchantAddress, fees, logger);
+  }
+
+  // Re-verify immediately before settling, including simulation so the
+  // facilitator never pays gas for a transfer that would revert.
+  const verified = await verifyPayment(payment, logger);
+  if (!verified.response.isValid || !verified.fees) {
+    return failure(
+      payer,
+      verified.response.invalidReason ?? Errors.ErrUnexpectedSettleError,
+      verified.response.invalidMessage
+    );
+  }
+  const fees = verified.fees;
+
+  // Claim the nonce atomically so concurrent settles of one payload cannot double-submit
+  if (useDatabase) {
+    try {
+      const claim = await createIfAbsent({
+        nonce,
+        userAddress: payer,
+        merchantAddress,
+        tokenAddress: config.usdcAddress as Address,
+        network: config.network,
+        totalAmount: fees.totalAmount,
+        merchantAmount: fees.merchantAmount,
+        feeAmount: fees.facilitatorFee,
+      });
+      if (claim === 'exists') {
+        return failure(payer, Errors.ErrNonceAlreadyUsed);
+      }
+    } catch (error: any) {
+      logger.error('Database error claiming nonce', { error: error.message });
+      return failure(payer, Errors.ErrUnexpectedSettleError, 'Failed to record payment');
+    }
+  } else {
+    if (claimedNonces.has(nonce)) {
+      return failure(payer, Errors.ErrNonceAlreadyUsed);
+    }
+    claimedNonces.add(nonce);
+    logger.warn('Using in-memory nonce tracking, not production safe');
+  }
+
+  logger.info('Submitting transferWithAuthorization', {
+    from: payer,
+    totalAmount: fees.totalAmount.toString(),
+    merchantAmount: fees.merchantAmount.toString(),
+    facilitatorFee: fees.facilitatorFee.toString(),
+    merchantAddress,
+  });
+
+  let incomingHash: Hex;
+  try {
+    incomingHash = await submitIncomingTransfer(payment);
+  } catch (error: any) {
+    logger.error('Failed to submit transferWithAuthorization', { error: error.message });
+    await recordStatus(nonce, 'failed', undefined, { error: error.shortMessage || error.message });
+    return failure(payer, Errors.ErrInvalidTransactionState, error.shortMessage || error.message);
+  }
+
+  await recordStatus(nonce, 'incoming_submitted', { incomingTxHash: incomingHash }, { txHash: incomingHash });
+
+  return completeSettlement(payment, incomingHash, merchantAddress, fees, logger);
 }

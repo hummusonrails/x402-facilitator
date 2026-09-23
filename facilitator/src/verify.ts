@@ -1,271 +1,280 @@
-import { Address } from 'viem';
-import { config, USDC_NAME, USDC_VERSION, SERVICE_FEE_BPS, GAS_FEE_USDC, normalizeNetworkId } from './config.js';
-import { verifyTransferAuthorization } from './eip3009.js';
-import { createIfAbsent } from './nonceStore.js';
+import { getAddress, hashTypedData, recoverAddress, parseAbi, type Address, type Hex } from 'viem';
+import { config, FACILITATOR_ADDRESS, USDC_NAME, USDC_VERSION, MAX_SETTLEMENT_AMOUNT } from './config.js';
+import { publicClient, facilitatorAccount, USDC_ABI, splitEcdsaSignature } from './clients.js';
+import { computeFeeSplit, type FeeSplit } from './fees.js';
+import { getPayment } from './nonceStore.js';
 import { isDatabaseConfigured } from './db.js';
-import type { VerifyRequest, VerifyResponse, EIP3009Authorization, EIP3009Signature } from './types.js';
+import type { NormalizedPayment, VerifyResponse } from './types.js';
+import * as Errors from './errors.js';
 import { Logger } from './logging.js';
 
-const usedNonces = new Set<string>();
 const useDatabase = isDatabaseConfigured();
 
-export async function verifyPayment(
-  request: VerifyRequest,
-  facilitatorAddress: Address,
-  merchantAddress: Address,
-  logger: Logger
-): Promise<VerifyResponse> {
-  const { paymentPayload, paymentRequirements } = request;
+// ERC-6492 wrapped signatures need a factory deployment before settlement,
+// which this facilitator does not perform.
+const ERC6492_MAGIC_SUFFIX = '6492649264926492649264926492649264926492649264926492649264926492';
 
-  logger.info('Starting payment verification');
+// Allow for block time between verify and settle, as the reference implementation does
+const VALID_BEFORE_BUFFER_SECONDS = 6n;
 
-  if (paymentRequirements.scheme !== 'exact') {
-    logger.warn('Invalid scheme', { scheme: paymentRequirements.scheme });
-    return {
-      valid: false,
-      invalidReason: `Invalid scheme: ${paymentRequirements.scheme}. Only 'exact' is supported.`,
-    };
-  }
+const authorizationTypes = {
+  TransferWithAuthorization: [
+    { name: 'from', type: 'address' },
+    { name: 'to', type: 'address' },
+    { name: 'value', type: 'uint256' },
+    { name: 'validAfter', type: 'uint256' },
+    { name: 'validBefore', type: 'uint256' },
+    { name: 'nonce', type: 'bytes32' },
+  ],
+} as const;
 
-  if (paymentPayload.scheme !== 'exact') {
-    logger.warn('Payload scheme mismatch', { scheme: paymentPayload.scheme });
-    return {
-      valid: false,
-      invalidReason: `Invalid payload scheme: ${paymentPayload.scheme}`,
-    };
-  }
+export interface VerifyResult {
+  response: VerifyResponse;
+  fees?: FeeSplit;
+}
 
-  const requirementNetwork = normalizeNetworkId(paymentRequirements.network);
-  if (requirementNetwork !== config.network) {
-    logger.warn('Invalid network', { 
-      requested: paymentRequirements.network, 
-      configured: config.network 
-    });
-    return {
-      valid: false,
-      invalidReason: `Invalid network: ${paymentRequirements.network}. Only ${config.network} is supported.`,
-    };
-  }
-
-  const payloadNetwork = normalizeNetworkId(paymentPayload.network);
-  if (payloadNetwork !== config.network) {
-    logger.warn('Payload network mismatch', { network: paymentPayload.network });
-    return {
-      valid: false,
-      invalidReason: `Invalid payload network: ${paymentPayload.network}`,
-    };
-  }
-
-  const requestedToken = paymentRequirements.token.toLowerCase();
-  const configuredToken = config.usdcAddress.toLowerCase();
-
-  if (requestedToken !== configuredToken) {
-    logger.warn('Invalid token in requirements', { requested: requestedToken, configured: configuredToken });
-    return {
-      valid: false,
-      invalidReason: `Invalid token address. Only ${config.usdcAddress} is supported.`,
-    };
-  }
-
-  const requestedRecipient = paymentRequirements.recipient.toLowerCase();
-  const facilitatorLower = facilitatorAddress.toLowerCase();
-
-  if (requestedRecipient !== facilitatorLower) {
-    logger.warn('Invalid recipient in requirements', { 
-      requested: requestedRecipient, 
-      expected: facilitatorLower 
-    });
-    return {
-      valid: false,
-      invalidReason: `Invalid recipient address. Payments must go to facilitator ${facilitatorAddress}`,
-    };
-  }
-
-  const payloadRecipient = paymentPayload.payload.to.toLowerCase();
-  if (payloadRecipient !== facilitatorLower) {
-    logger.warn('Payload recipient mismatch', { 
-      payloadRecipient, 
-      expected: facilitatorLower 
-    });
-    return {
-      valid: false,
-      invalidReason: 'Payload recipient does not match facilitator address',
-    };
-  }
-
-  if (paymentRequirements.amount !== paymentPayload.payload.value) {
-    logger.warn('Amount mismatch', {
-      requirements: paymentRequirements.amount,
-      payload: paymentPayload.payload.value,
-    });
-    return {
-      valid: false,
-      invalidReason: 'Amount mismatch between requirements and payload',
-    };
-  }
-
-  let amount: bigint;
-  try {
-    amount = BigInt(paymentRequirements.amount);
-  } catch (error) {
-    logger.warn('Invalid amount format', { amount: paymentRequirements.amount });
-    return {
-      valid: false,
-      invalidReason: 'Invalid amount format',
-    };
-  }
-
-  if (amount <= 0n) {
-    logger.warn('Amount must be positive', { amount: amount.toString() });
-    return {
-      valid: false,
-      invalidReason: 'Amount must be a positive integer',
-    };
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-  if (paymentPayload.payload.validAfter > now) {
-    logger.warn('Payment not yet valid', {
-      validAfter: paymentPayload.payload.validAfter,
-      now,
-    });
-    return {
-      valid: false,
-      invalidReason: 'Payment authorization not yet valid',
-    };
-  }
-
-  if (paymentPayload.payload.validBefore < now) {
-    logger.warn('Payment expired', {
-      validBefore: paymentPayload.payload.validBefore,
-      now,
-    });
-    return {
-      valid: false,
-      invalidReason: 'Payment authorization has expired',
-    };
-  }
-
-  const nonce = paymentPayload.payload.nonce;
-  
-  // Calculate fee breakdown
-  const totalAmount = BigInt(paymentRequirements.amount);
-  
-  // Guard against underflow: total must be at least gas fee
-  if (totalAmount < GAS_FEE_USDC) {
-    logger.error('Amount less than gas fee', {
-      totalAmount: totalAmount.toString(),
-      gasFee: GAS_FEE_USDC.toString(),
-    });
-    return {
-      valid: false,
-      invalidReason: `Amount ${totalAmount} is less than fixed gas fee ${GAS_FEE_USDC}`,
-    };
-  }
-  
-  const totalMinusGas = totalAmount - GAS_FEE_USDC;
-  const feeMultiplier = 10000n + BigInt(SERVICE_FEE_BPS);
-  const merchantAmount = (totalMinusGas * 10000n) / feeMultiplier;
-  const serviceFee = totalMinusGas - merchantAmount; // Use residual to ensure totals reconcile
-  const feeAmount = serviceFee + GAS_FEE_USDC;
-  
-  if (useDatabase) {
-    // Use persistent database storage
-    try {
-      const result = await createIfAbsent({
-        nonce,
-        userAddress: paymentPayload.payload.from as `0x${string}`,
-        merchantAddress,
-        tokenAddress: config.usdcAddress as `0x${string}`,
-        network: config.network,
-        totalAmount,
-        merchantAmount,
-        feeAmount,
-      });
-      
-      if (result === 'exists') {
-        logger.warn('Nonce already used (database)', { nonce });
-        return {
-          valid: false,
-          invalidReason: 'Nonce has already been used',
-        };
-      }
-      
-      logger.info('Nonce registered in database', { nonce });
-    } catch (error: any) {
-      logger.error('Database error checking nonce', { nonce, error: error.message });
-      return {
-        valid: false,
-        invalidReason: 'Internal error checking nonce uniqueness',
-      };
-    }
-  } else {
-    if (usedNonces.has(nonce)) {
-      logger.warn('Nonce already used (in-memory)', { nonce });
-      return {
-        valid: false,
-        invalidReason: 'Nonce has already been used',
-      };
-    }
-    usedNonces.add(nonce);
-    logger.warn('Using in-memory nonce tracking - not production safe!', { nonce });
-  }
-
-  const authorization: EIP3009Authorization = {
-    from: paymentPayload.payload.from as Address,
-    to: paymentPayload.payload.to as Address,
-    value: paymentPayload.payload.value,
-    validAfter: paymentPayload.payload.validAfter,
-    validBefore: paymentPayload.payload.validBefore,
-    nonce: paymentPayload.payload.nonce as `0x${string}`,
-  };
-
-  const signature: EIP3009Signature = {
-    v: paymentPayload.payload.v,
-    r: paymentPayload.payload.r as `0x${string}`,
-    s: paymentPayload.payload.s as `0x${string}`,
-  };
-
-  logger.info('Verifying EIP-3009 signature');
-
-  const recoveredSigner = await verifyTransferAuthorization(
-    authorization,
-    signature,
-    config.usdcAddress as Address,
-    USDC_NAME,
-    USDC_VERSION,
-    config.chainId
-  );
-
-  if (!recoveredSigner) {
-    logger.warn('Signature verification failed');
-    return {
-      valid: false,
-      invalidReason: 'Invalid signature',
-    };
-  }
-
-  if (recoveredSigner.toLowerCase() !== paymentPayload.payload.from.toLowerCase()) {
-    logger.warn('Signer mismatch', {
-      recovered: recoveredSigner,
-      expected: paymentPayload.payload.from,
-    });
-    return {
-      valid: false,
-      invalidReason: 'Signature does not match from address',
-    };
-  }
-
-  logger.info('Payment verification successful', {
-    from: paymentPayload.payload.from,
-    amount: amount.toString(),
-  });
-
+function invalid(reason: string, payer: string, message?: string): VerifyResult {
   return {
-    valid: true,
+    response: {
+      isValid: false,
+      invalidReason: reason,
+      ...(message && { invalidMessage: message }),
+      payer,
+    },
   };
 }
 
-export function markNonceAsUsed(nonce: string): void {
-  usedNonces.add(nonce);
+function sameAddress(a: string | undefined, b: string): boolean {
+  return !!a && a.toLowerCase() === b.toLowerCase();
+}
+
+const ERC1271_ABI = parseAbi(['function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)']);
+const ERC1271_MAGIC_VALUE = '0x1626ba7e';
+
+/**
+ * Mirror the token's onchain SignatureChecker: ecrecover when the signer has no
+ * code, and EIP-1271 only (no ECDSA fallback) when it does. This covers smart
+ * wallets and EIP-7702 delegated EOAs, whose delegate decides validity.
+ */
+async function isValidSignatureStrict(signer: Address, hash: Hex, signature: Hex): Promise<boolean> {
+  const code = await publicClient.getCode({ address: signer });
+  if (!code || code === '0x') {
+    if (signature.length !== 132) return false;
+    const recovered = await recoverAddress({ hash, signature });
+    return recovered.toLowerCase() === signer.toLowerCase();
+  }
+  try {
+    const result = await publicClient.readContract({
+      address: signer,
+      abi: ERC1271_ABI,
+      functionName: 'isValidSignature',
+      args: [hash, signature],
+    });
+    return result.toLowerCase() === ERC1271_MAGIC_VALUE;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Simulate the transferWithAuthorization call the facilitator would submit at settlement.
+ */
+export async function simulateTransfer(payment: NormalizedPayment): Promise<void> {
+  const { authorization: auth, signature } = payment;
+  const vrs = splitEcdsaSignature(signature);
+  const base = [auth.from, auth.to, auth.value, auth.validAfter, auth.validBefore, auth.nonce] as const;
+
+  if (vrs) {
+    await publicClient.simulateContract({
+      address: config.usdcAddress as Address,
+      abi: USDC_ABI,
+      functionName: 'transferWithAuthorization',
+      account: facilitatorAccount,
+      args: [...base, vrs.v, vrs.r, vrs.s],
+    });
+  } else {
+    await publicClient.simulateContract({
+      address: config.usdcAddress as Address,
+      abi: USDC_ABI,
+      functionName: 'transferWithAuthorization',
+      account: facilitatorAccount,
+      args: [...base, signature],
+    });
+  }
+}
+
+/**
+ * Verify an exact EVM (eip3009) payment against its requirements.
+ *
+ * Read-only per the x402 v2 spec (section 7.1): nothing is written to the
+ * database or chain. Settlement re-runs these checks before submitting.
+ */
+export async function verifyPayment(
+  payment: NormalizedPayment,
+  logger: Logger,
+  options: { simulate?: boolean } = {}
+): Promise<VerifyResult> {
+  const { requirements, accepted, authorization: auth, signature } = payment;
+  const payer = auth.from;
+
+  logger.info('Starting payment verification', { x402Version: payment.x402Version });
+
+  if (requirements.scheme !== 'exact' || accepted.scheme !== 'exact') {
+    return invalid(Errors.ErrInvalidScheme, payer, `Only the exact scheme is supported`);
+  }
+
+  if (requirements.network !== config.network) {
+    return invalid(Errors.ErrInvalidNetwork, payer, `This facilitator settles on ${config.network}`);
+  }
+
+  if (accepted.network !== requirements.network) {
+    return invalid(Errors.ErrNetworkMismatch, payer);
+  }
+
+  // v2 payloads echo the accepted requirements; they must be the ones being verified against
+  if (payment.x402Version === 2) {
+    if (
+      accepted.amount !== requirements.amount ||
+      !sameAddress(accepted.asset, requirements.asset) ||
+      !sameAddress(accepted.payTo, requirements.payTo)
+    ) {
+      return invalid(Errors.ErrInvalidPaymentRequirements, payer, 'paymentPayload.accepted does not match paymentRequirements');
+    }
+  }
+
+  if (!sameAddress(requirements.asset, config.usdcAddress)) {
+    return invalid(Errors.ErrUnsupportedAsset, payer, `Only ${config.usdcAddress} is supported`);
+  }
+
+  // Fee split model: the payer pays the facilitator, which forwards the merchant share
+  if (!sameAddress(requirements.payTo, FACILITATOR_ADDRESS)) {
+    return invalid(Errors.ErrRecipientMismatch, payer, `payTo must be the facilitator address ${FACILITATOR_ADDRESS}`);
+  }
+
+  const { name, version } = requirements.extra as { name?: unknown; version?: unknown };
+  if (typeof name !== 'string' || typeof version !== 'string') {
+    return invalid(Errors.ErrMissingEip712Domain, payer, 'paymentRequirements.extra must include name and version');
+  }
+  if (name !== USDC_NAME) {
+    return invalid(Errors.ErrTokenNameMismatch, payer, `Expected EIP-712 name "${USDC_NAME}"`);
+  }
+  if (version !== USDC_VERSION) {
+    return invalid(Errors.ErrTokenVersionMismatch, payer, `Expected EIP-712 version "${USDC_VERSION}"`);
+  }
+
+  if (signature.toLowerCase().endsWith(ERC6492_MAGIC_SUFFIX)) {
+    return invalid(Errors.ErrInvalidSignature, payer, 'ERC-6492 signatures from undeployed wallets are not supported');
+  }
+
+  let signatureValid = false;
+  try {
+    const hash = hashTypedData({
+      domain: {
+        name,
+        version,
+        chainId: config.chainId,
+        verifyingContract: getAddress(config.usdcAddress),
+      },
+      types: authorizationTypes,
+      primaryType: 'TransferWithAuthorization',
+      message: {
+        from: auth.from,
+        to: auth.to,
+        value: auth.value,
+        validAfter: auth.validAfter,
+        validBefore: auth.validBefore,
+        nonce: auth.nonce,
+      },
+    });
+    signatureValid = await isValidSignatureStrict(auth.from, hash, signature);
+  } catch (error: any) {
+    logger.warn('Signature verification threw', { error: error.message });
+  }
+  if (!signatureValid) {
+    return invalid(Errors.ErrInvalidSignature, payer);
+  }
+
+  if (!sameAddress(auth.to, requirements.payTo)) {
+    return invalid(Errors.ErrRecipientMismatch, payer, 'authorization.to does not match payTo');
+  }
+
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  if (auth.validBefore < now + VALID_BEFORE_BUFFER_SECONDS) {
+    return invalid(Errors.ErrValidBeforeExpired, payer);
+  }
+  if (auth.validAfter > now) {
+    return invalid(Errors.ErrValidAfterInFuture, payer);
+  }
+
+  let requiredAmount: bigint;
+  try {
+    requiredAmount = BigInt(requirements.amount);
+  } catch {
+    return invalid(Errors.ErrInvalidPaymentRequirements, payer, 'amount must be an integer string');
+  }
+  if (auth.value !== requiredAmount) {
+    return invalid(Errors.ErrAuthorizationValueMismatch, payer);
+  }
+
+  const fees = computeFeeSplit(requiredAmount);
+  if (!fees) {
+    return invalid(Errors.ErrAmountBelowFee, payer, `amount must cover the fixed gas fee`);
+  }
+  if (requiredAmount > MAX_SETTLEMENT_AMOUNT) {
+    return invalid(Errors.ErrAmountAboveLimit, payer, `amount exceeds ${MAX_SETTLEMENT_AMOUNT}`);
+  }
+
+  // A settlement for this nonce may be in flight and not yet visible onchain
+  if (useDatabase) {
+    try {
+      if (await getPayment(auth.nonce)) {
+        return invalid(Errors.ErrNonceAlreadyUsed, payer);
+      }
+    } catch (error: any) {
+      logger.error('Database error checking nonce', { error: error.message });
+      return invalid(Errors.ErrUnexpectedVerifyError, payer);
+    }
+  }
+
+  try {
+    const [nonceUsed, balance] = await Promise.all([
+      publicClient.readContract({
+        address: config.usdcAddress as Address,
+        abi: USDC_ABI,
+        functionName: 'authorizationState',
+        args: [auth.from, auth.nonce],
+      }),
+      publicClient.readContract({
+        address: config.usdcAddress as Address,
+        abi: USDC_ABI,
+        functionName: 'balanceOf',
+        args: [auth.from],
+      }),
+    ]);
+    if (nonceUsed) {
+      return invalid(Errors.ErrNonceAlreadyUsed, payer);
+    }
+    if (balance < auth.value) {
+      return invalid(Errors.ErrInsufficientFunds, payer);
+    }
+  } catch (error: any) {
+    logger.error('Onchain state check failed', { error: error.message });
+    return invalid(Errors.ErrUnexpectedVerifyError, payer, error.message);
+  }
+
+  if (options.simulate !== false) {
+    try {
+      await simulateTransfer(payment);
+    } catch (error: any) {
+      logger.warn('Transfer simulation failed', { error: error.shortMessage || error.message });
+      return invalid(Errors.ErrSimulationFailed, payer, error.shortMessage || error.message);
+    }
+  }
+
+  logger.info('Payment verification successful', { payer, amount: requiredAmount.toString() });
+
+  return {
+    response: { isValid: true, payer },
+    fees,
+  };
 }

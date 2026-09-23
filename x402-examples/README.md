@@ -1,22 +1,24 @@
 # X402 Integration Examples
 
-This directory contains working examples demonstrating x402 payment integration with the Arbitrum facilitator using CAIP-2 network IDs and the updated payment headers.
+This directory contains examples demonstrating x402 v2 payment integration with the Arbitrum facilitator using the official `@x402/*` SDKs from [x402-foundation/x402](https://github.com/x402-foundation/x402).
 
 ## Integration Overview
 
-All examples use the x402 protocol where clients only need the facilitator URL (`NEXT_PUBLIC_FACILITATOR_URL` or `FACILITATOR_URL`). The facilitator address is provided dynamically through the `/requirements` endpoint and surfaced in the `PAYMENT-RESPONSE` header.
+Resource servers use the SDK middleware with an `HTTPFacilitatorClient` pointed at `FACILITATOR_URL`, sending the merchant API key only on `/settle`. Buyers pay the facilitator's signer address, read at startup from `GET /supported` (`signers["eip155:*"][0]`); the facilitator forwards the merchant share to the address tied to the API key.
+
+The HTTP flow follows the spec: the server replies 402 with a `PAYMENT-REQUIRED` header, the client retries with `PAYMENT-SIGNATURE`, and the server returns `PAYMENT-RESPONSE` with the settlement result. Clients built with `@x402/fetch` or `@x402/axios` handle this automatically.
 
 ## Getting Started
 
 **New to x402?** Start here:
-- [Quick Start Guide](./QUICK_START.md) - Get running in 5 minutes
-- [Integration Walkthrough](./INTEGRATION_WALKTHROUGH.md) - Step-by-step implementation guide
+- [Quick Start Guide](./QUICK_START.md): get running in 5 minutes
+- [Integration Walkthrough](./INTEGRATION_WALKTHROUGH.md): step-by-step implementation guide
 
 ## Quick Start
 
 1. Start the facilitator: `cd ../facilitator && pnpm dev`
 2. Choose an example and follow its README
-3. Configure the facilitator URL in environment variables; network IDs should use CAIP-2 (`eip155:421614` for Arbitrum Sepolia, `eip155:42161` for Arbitrum One)
+3. Configure the facilitator URL in environment variables; network IDs use CAIP-2 (`eip155:421614` for Arbitrum Sepolia, `eip155:42161` for Arbitrum One) and must match the facilitator's `NETWORK`
 
 ## Examples
 
@@ -25,39 +27,37 @@ All examples use the x402 protocol where clients only need the facilitator URL (
 
 [View Example](./basic-express/)
 
-A minimal Express.js server showing:
-- 402 Payment Required responses
-- Backend payment settlement
-- Protected content delivery
+A runnable Express.js server and client showing:
+- `@x402/express` `paymentMiddleware` with the facilitator as `payTo`
+- Settlement through the facilitator with a merchant API key
+- A paying client built with `@x402/fetch`
 
-### 2. Next.js Full-Stack App
+### 2. Next.js App
 **Best for:** Modern web applications, full-stack projects
 
 [View Example](./nextjs-app/)
 
-A complete Next.js application with:
-- Client-side wallet integration
-- Server-side payment processing
-- TypeScript support
-- Modern UI with Tailwind CSS
+A runnable Next.js 16 app (App Router, React 19, TypeScript) with:
+- `withX402` from `@x402/next` protecting an API route
+- Dynamic `payTo` read from the facilitator
+- Settlement only after the route handler succeeds
 
 ### 3. React Client
 **Best for:** Frontend-only applications, SPAs
 
 [View Example](./react-client/)
 
-A React frontend demonstrating:
+A README-only guide for a React frontend with:
 - Wallet connection with wagmi
-- EIP-3009 signature creation
-- Payment flow UI components
+- `@x402/fetch` signing EIP-3009 authorizations with the connected wallet
+- Reading the settlement result from `PAYMENT-RESPONSE`
 
 ## Quick Start
 
 Each example includes:
-- Complete source code
 - Environment configuration
 - Step-by-step setup instructions
-- Testing guide
+- Code for the server or client side (`basic-express` and `nextjs-app` are runnable; `react-client` is snippets in its README)
 
 ## Prerequisites
 
@@ -85,20 +85,21 @@ Each example includes:
 4. **Test on Sepolia**
    - Get test USDC
    - Run the example
-   - Make a test payment using requirements returned in `PAYMENT-RESPONSE`
+   - Make a test payment (for `basic-express`, run `npm run client` with a funded test wallet)
 
 5. **Deploy to Production**
-   - Update to Arbitrum mainnet
-   - Use production USDC address
+   - Point at a facilitator running with `NETWORK=eip155:42161` (Arbitrum One)
+   - Set `NETWORK=eip155:42161` in your app
    - Enable security features
 
 ## Documentation
 
-- [Quick Start](./QUICK_START.md) - 5-minute setup guide
-- [Integration Walkthrough](./INTEGRATION_WALKTHROUGH.md) - Detailed implementation
-- [Main Documentation](../README.md) - Full facilitator docs
-- [Integration Guide](../docs/INTEGRATION_GUIDE.md) - API reference
-- [Security Guide](../docs/SECURITY.md) - Best practices
+- [Quick Start](./QUICK_START.md): 5-minute setup guide
+- [Integration Walkthrough](./INTEGRATION_WALKTHROUGH.md): detailed implementation
+- [Main Documentation](../README.md): full facilitator docs and API reference
+- [Integration Guide](../docs/INTEGRATION_GUIDE.md): merchant integration
+- [Authentication Guide](../docs/AUTHENTICATION_GUIDE.md): API keys and security
+- [x402 specification](https://github.com/x402-foundation/x402/tree/main/specs)
 
 ## Support
 

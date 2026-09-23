@@ -1,15 +1,27 @@
 # X402 Facilitator for Arbitrum
 
-Production-ready x402 payment facilitator service for Arbitrum networks with CAIP-2 identifiers and native USDC settlement using EIP-3009 transfer authorizations.
+x402 payment facilitator for Arbitrum, aligned with the [x402 v2 specification](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md). It verifies and settles `exact` scheme payments in native USDC using EIP-3009 `transferWithAuthorization`, and works with the official `@x402/*` SDKs (for example `HTTPFacilitatorClient` in `@x402/core`).
 
 ## Features
 
-- **CAIP-2 network IDs**: Uses `eip155:42161` and `eip155:421614` with legacy aliases accepted
-- **EIP-3009 verification**: Full signature verification for transfer authorizations
-- **Strict validation**: Network, token, recipient, amount, and timing checks
-- **Idempotency**: Nonce tracking to prevent replay attacks
-- **Production-ready**: Structured logging, health checks, error handling
-- **Header-friendly paywall**: Requirements emitted in `PAYMENT-RESPONSE` (and mirrored to `X-PAYMENT-RESPONSE` for older clients)
+- **Spec facilitator API**: `POST /verify`, `POST /settle`, and `GET /supported` use the v2 request and response shapes; v1 payloads are still accepted
+- **CAIP-2 network IDs**: `eip155:42161` and `eip155:421614`, with legacy aliases accepted
+- **Spec verification rules**: exact amount match, validity window (6 second buffer), balance check, onchain nonce check, and transfer simulation
+- **Strict signatures**: mirrors USDC's onchain `SignatureChecker` (ecrecover for EOAs, EIP-1271 for smart wallets and EIP-7702 delegated EOAs)
+- **Read-only verify**: `/verify` writes nothing, so verify then settle works as the spec intends
+- **`settlement_pending` support**: retrying an unconfirmed settlement reconciles against the broadcast transaction instead of sending a new one
+- **Fee split**: the facilitator is `payTo`, takes a service and gas fee, and forwards the rest to the merchant tied to the API key
+
+## How payment flows
+
+1. The resource server returns HTTP 402 with a `PAYMENT-REQUIRED` header whose `payTo` is the facilitator address (read it from `GET /supported` under `signers["eip155:*"]`).
+2. The buyer signs an EIP-3009 authorization and retries with `PAYMENT-SIGNATURE`.
+3. The resource server calls `POST /verify`, runs its handler, then calls `POST /settle` with its merchant `X-API-Key`.
+4. The facilitator submits `transferWithAuthorization` (buyer to facilitator), then transfers the merchant share to the merchant address.
+
+The fee is `total = merchant + merchant * SERVICE_FEE_BPS / 10000 + GAS_FEE_USDC`. The service fee is taken as the residual so the parts always sum to the amount paid. The amount must cover `GAS_FEE_USDC`.
+
+Each instance settles on the single network set by `NETWORK`. Only the `eip3009` asset transfer method (the spec default for exact EVM) is supported.
 
 ## API Endpoints
 
@@ -27,136 +39,155 @@ Health check endpoint.
 ```
 
 ### `GET /supported`
-Returns supported payment kinds.
+Returns the supported payment kinds and the facilitator signer, which is also the required `payTo`.
 
 **Response:**
 ```json
 {
   "kinds": [
-    { "x402Version": 1, "scheme": "exact", "network": "arbitrum" },
-    { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" },
-    { "x402Version": 2, "scheme": "exact", "network": "eip155:42161", "payTo": "0x..." },
-    { "x402Version": 2, "scheme": "exact", "network": "eip155:421614", "payTo": "0x..." }
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:421614" },
+    { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" }
   ],
-  "versions": {
-    "1": { "kinds": [{ "x402Version": 1, "scheme": "exact", "network": "arbitrum" }, { "x402Version": 1, "scheme": "exact", "network": "arbitrum-sepolia" }] },
-    "2": { "kinds": [{ "x402Version": 2, "scheme": "exact", "network": "eip155:42161", "payTo": "0x..." }, { "x402Version": 2, "scheme": "exact", "network": "eip155:421614", "payTo": "0x..." }] }
-  },
-  "signingAddresses": {
-    "settlement": "0x..."
-  },
-  "extensions": []
-}
-```
-
-### `GET /requirements` / `POST /requirements`
-Returns payment requirements for the configured network. Defaults to the latest shape; pass `version=1` (query string) or `{"x402Version":1}` in the body for the legacy structure.
-
-**Headers:**
-- `PAYMENT-RESPONSE`: JSON string of the requirements (mirrored to `X-PAYMENT-RESPONSE` for older clients)
-
-**Response body (default):**
-```json
-{
-  "x402Version": 2,
-  "error": "Payment required",
-  "accepts": [
-    {
-      "scheme": "exact",
-      "network": "eip155:421614",
-      "maxAmountRequired": "1000000",
-      "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-      "payTo": "0x...",
-      "resource": "http://localhost:3002/resource",
-      "description": "Payment required for resource access",
-      "mimeType": "application/json",
-      "maxTimeoutSeconds": 3600,
-      "extra": {
-        "feeMode": "facilitator_split",
-        "feeBps": 50,
-        "gasBufferWei": "100000",
-        "nonce": "0x...",
-        "deadline": 1735689600
-      }
-    }
-  ]
+  "extensions": [],
+  "signers": {
+    "eip155:*": ["0xFacilitatorAddress"]
+  }
 }
 ```
 
 ### `POST /verify`
-Verifies a payment payload without executing settlement. The payload can be provided in the request body or as JSON in the `PAYMENT-SIGNATURE` header.
+Verifies a payment without settling it. Read-only.
 
 **Request:**
 ```json
 {
+  "x402Version": 2,
   "paymentPayload": {
-    "scheme": "exact",
-    "network": "eip155:421614",
+    "x402Version": 2,
+    "resource": { "url": "https://api.example.com/premium", "mimeType": "application/json" },
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:421614",
+      "amount": "500000",
+      "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+      "payTo": "0xFacilitatorAddress",
+      "maxTimeoutSeconds": 300,
+      "extra": { "name": "USD Coin", "version": "2" }
+    },
     "payload": {
-      "from": "0x...",
-      "to": "0x...",
-      "value": "1000000",
-      "validAfter": 0,
-      "validBefore": 1735689600,
-      "nonce": "0x...",
-      "v": 27,
-      "r": "0x...",
-      "s": "0x..."
+      "signature": "0x...",
+      "authorization": {
+        "from": "0xBuyer",
+        "to": "0xFacilitatorAddress",
+        "value": "500000",
+        "validAfter": "1740672089",
+        "validBefore": "1740672389",
+        "nonce": "0x..."
+      }
     }
   },
   "paymentRequirements": {
     "scheme": "exact",
     "network": "eip155:421614",
-    "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-    "amount": "1000000",
-    "recipient": "0x...",
-    "description": "Payment for service",
-    "maxTimeoutSeconds": 300
+    "amount": "500000",
+    "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+    "payTo": "0xFacilitatorAddress",
+    "maxTimeoutSeconds": 300,
+    "extra": { "name": "USD Coin", "version": "2" }
   }
 }
 ```
 
-**Response:**
+**Response (200):**
 ```json
-{
-  "valid": true
-}
+{ "isValid": true, "payer": "0xBuyer" }
 ```
 
-Or on error:
 ```json
-{
-  "valid": false,
-  "invalidReason": "Invalid signature"
-}
+{ "isValid": false, "invalidReason": "insufficient_funds", "payer": "0xBuyer" }
 ```
+
+A malformed request returns 400 with `isValid: false` and `invalidReason` set to `invalid_payload`, `invalid_payment_requirements`, `invalid_x402_version`, or `unsupported_payload_type`.
 
 ### `POST /settle`
-Verifies and executes onchain settlement. The payload can be provided in the request body or as JSON in the `PAYMENT-SIGNATURE` header.
+Verifies again, then settles onchain and forwards the merchant share.
 
-**Request:** Same as `/verify`
+**Authentication:** Requires the merchant `X-API-Key` header.
 
-**Response:**
+**Request:** Same as `/verify`.
+
+**Response (200):**
 ```json
 {
   "success": true,
-  "transactionHash": "0x...",
-  "blockNumber": 12345678,
-  "status": "confirmed",
-  "feeBreakdown": {
-    "merchantAmount": "1000000",
-    "serviceFee": "5000",
-    "gasFee": "100000",
-    "totalAmount": "1105000"
+  "payer": "0xBuyer",
+  "transaction": "0x...",
+  "network": "eip155:421614",
+  "amount": "500000",
+  "extra": {
+    "merchantAddress": "0xMerchant",
+    "forward": { "status": "complete", "transaction": "0x..." },
+    "feeBreakdown": {
+      "merchantAmount": "398009",
+      "serviceFee": "1991",
+      "gasFee": "100000",
+      "totalAmount": "500000"
+    }
   }
 }
 ```
 
-Or on error:
+`transaction` is the buyer's `transferWithAuthorization`. `extra.forward.status` is `pending` if the payment landed but forwarding to the merchant has not confirmed yet; the recovery worker retries it.
+
+**Failure:**
 ```json
 {
   "success": false,
-  "error": "Settlement failed: insufficient allowance"
+  "errorReason": "invalid_exact_evm_nonce_already_used",
+  "payer": "0xBuyer",
+  "transaction": "",
+  "network": "eip155:421614"
+}
+```
+
+`settlement_pending` is non-terminal: the transaction was broadcast but not confirmed within `SETTLEMENT_CONFIRMATION_TIMEOUT_MS`, and `transaction` holds its hash. Retrying the same payload with the same merchant key reconciles against that transaction.
+
+### Error reasons
+
+Protocol codes from the spec: `insufficient_funds`, `invalid_network`, `invalid_payload`, `invalid_payment_requirements`, `invalid_x402_version`, `invalid_transaction_state`, `unexpected_verify_error`, `unexpected_settle_error`, `settlement_pending`.
+
+Exact EVM codes, matching the reference facilitator: `invalid_exact_evm_scheme`, `invalid_exact_evm_network_mismatch`, `invalid_exact_evm_missing_eip712_domain`, `invalid_exact_evm_recipient_mismatch`, `invalid_exact_evm_signature`, `invalid_exact_evm_payload_authorization_valid_before`, `invalid_exact_evm_payload_authorization_valid_after`, `invalid_exact_evm_payload_authorization_value_mismatch`, `invalid_exact_evm_token_name_mismatch`, `invalid_exact_evm_token_version_mismatch`, `invalid_exact_evm_nonce_already_used`, `invalid_exact_evm_transaction_simulation_failed`, `invalid_exact_evm_transaction_failed`, `invalid_exact_evm_transfer_event_mismatch`, `unsupported_payload_type`.
+
+Facilitator specific: `unsupported_asset`, `amount_below_facilitator_fee`, `amount_above_facilitator_limit`, `merchant_not_registered`, `merchant_disabled`.
+
+### `GET /requirements` / `POST /requirements`
+Helper that builds a `PaymentRequired` object for this facilitator. Returns 200 with the object in the body and base64 encoded in the `PAYMENT-REQUIRED` header. Pass `version=1` (query) or `"x402Version": 1` (body) for the legacy v1 shape.
+
+`GET /requirements?amount=500000` or `POST /requirements` with:
+```json
+{
+  "amount": "500000",
+  "resource": { "url": "https://api.example.com/premium", "description": "Premium data", "mimeType": "application/json" }
+}
+```
+
+**Response:**
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required",
+  "resource": { "url": "https://api.example.com/premium", "description": "Premium data", "mimeType": "application/json" },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:421614",
+      "amount": "500000",
+      "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+      "payTo": "0xFacilitatorAddress",
+      "maxTimeoutSeconds": 300,
+      "extra": { "name": "USD Coin", "version": "2", "feeBps": 50, "gasFee": "100000" }
+    }
+  ]
 }
 ```
 
@@ -230,6 +261,9 @@ PORT=3002
 
 # Optional: Max settlement amount in smallest unit (default: 1000 USDC)
 MAX_SETTLEMENT_AMOUNT=1000000000
+
+# Optional: How long to wait for a settlement receipt before returning settlement_pending (default: 180000)
+SETTLEMENT_CONFIRMATION_TIMEOUT_MS=180000
 ```
 
 ### Running
@@ -267,10 +301,11 @@ docker run -p 3002:3002 --env-file .env x402-facilitator
 
 ## Security
 
-- All payment parameters are strictly validated
-- EIP-3009 signatures are cryptographically verified
-- Nonce tracking prevents replay attacks
-- Recipient and token addresses must match configuration
+- Requests are validated with the canonical `@x402/core` schemas
+- Signatures are checked the way USDC checks them onchain, and every settlement is simulated first
+- Nonces are claimed atomically in PostgreSQL and checked against onchain `authorizationState`
+- Settlement confirms the expected USDC `Transfer` event, not just a successful receipt
+- Asset, network, and `payTo` must match this instance's configuration
 - Amount limits enforced (default: 1000 USDC max)
 - Timing windows validated (validAfter/validBefore)
 
@@ -279,14 +314,19 @@ docker run -p 3002:3002 --env-file .env x402-facilitator
 ```
 facilitator/
 ├── src/
-│   ├── server.ts      # Express server with API endpoints
-│   ├── config.ts      # Network and environment configuration
-│   ├── types.ts       # TypeScript types and Zod schemas
-│   ├── verify.ts      # Payment verification logic
-│   ├── settle.ts      # onchain settlement execution
-│   ├── eip3009.ts     # EIP-3009 signature verification
-│   ├── logging.ts     # Structured logging utilities
-│   └── health.ts      # Health check handler
+│   ├── server.ts        # Express server with API endpoints
+│   ├── x402.ts          # Parses and normalizes v1/v2 facilitator requests
+│   ├── verify.ts        # Exact EVM (eip3009) verification
+│   ├── settle.ts        # Onchain settlement, forwarding, and pending reconciliation
+│   ├── requirements.ts  # PaymentRequired helper
+│   ├── fees.ts          # Fee split calculation
+│   ├── errors.ts        # Error reason codes
+│   ├── clients.ts       # viem clients and USDC ABI
+│   ├── config.ts        # Network and environment configuration
+│   ├── types.ts         # Types (wire types re-exported from @x402/core)
+│   ├── recovery.ts      # Retries incomplete merchant forwards
+│   ├── logging.ts       # Structured logging utilities
+│   └── health.ts        # Health check handler
 ├── package.json
 ├── tsconfig.json
 ├── Dockerfile

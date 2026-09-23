@@ -219,81 +219,57 @@ function IntegrationGuide({ merchantAddress, apiKey }: { merchantAddress: string
       <h4 style={{ color: '#e6edf3' }}>1. Environment Variables</h4>
       <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
         <code style={{ color: '#8b949e' }}>{`FACILITATOR_URL=${facilitatorUrl}
-MERCHANT_API_KEY=${apiKey.slice(0, 16)}...
-MERCHANT_ADDRESS=${merchantAddress}`}</code>
+MERCHANT_API_KEY=${apiKey.slice(0, 16)}...`}</code>
       </pre>
 
-      <h4 style={{ color: '#e6edf3' }}>2. Return 402 Response</h4>
+      <h4 style={{ color: '#e6edf3' }}>2. Install the x402 SDK</h4>
       <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code style={{ color: '#8b949e' }}>{`// In your API endpoint
-res.status(402).json({
-  error: "Payment required",
-  facilitatorUrl: "${facilitatorUrl}",
-  amount: "1000000", // 1 USDC (6 decimals)
-  merchantAddress: "${merchantAddress}",
-  description: "Access to premium content"
-});`}</code>
+        <code style={{ color: '#8b949e' }}>{`npm install @x402/express @x402/evm @x402/core`}</code>
       </pre>
 
-      <h4 style={{ color: '#e6edf3' }}>3. Client Fetches Requirements</h4>
+      <h4 style={{ color: '#e6edf3' }}>3. Protect Your Route</h4>
       <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code style={{ color: '#8b949e' }}>{`// Client-side: Fetch complete requirements from facilitator
-const requirements = await fetch('${facilitatorUrl}/requirements', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    amount: "1000000",
-    memo: "Premium content access",
-    extra: { merchantAddress: "${merchantAddress}" }
-  })
-}).then(r => r.json());
+        <code style={{ color: '#8b949e' }}>{`import { paymentMiddleware, x402ResourceServer } from "@x402/express";
+import { ExactEvmScheme } from "@x402/evm/exact/server";
+import { HTTPFacilitatorClient } from "@x402/core/server";
 
-// Response includes facilitator address and all required fields:
-// {
-//   network: "arbitrum-sepolia",
-//   token: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-//   recipient: "0xFACILITATOR_ADDRESS", // Provided by facilitator
-//   amount: "1100500", // Includes fees
-//   nonce: "0x...",
-//   deadline: 1731024000,
-//   ...
-// }`}</code>
+const facilitator = new HTTPFacilitatorClient({
+  url: process.env.FACILITATOR_URL,
+  // Your API key is only sent on /settle, from your backend
+  createAuthHeaders: async () => ({
+    verify: {},
+    settle: { "X-API-Key": process.env.MERCHANT_API_KEY },
+    supported: {},
+  }),
+});
+
+// Buyers pay the facilitator, which forwards your share to ${merchantAddress}
+const supported = await fetch(process.env.FACILITATOR_URL + "/supported").then(r => r.json());
+const payTo = supported.signers["eip155:*"][0];
+
+const server = new x402ResourceServer(facilitator)
+  .register("eip155:421614", new ExactEvmScheme());
+
+app.use(paymentMiddleware({
+  "GET /premium": {
+    accepts: { scheme: "exact", price: "$0.50", network: "eip155:421614", payTo },
+    description: "Access to premium content",
+  },
+}, server));`}</code>
       </pre>
 
-      <h4 style={{ color: '#e6edf3' }}>4. Client Creates Permit</h4>
-      <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code style={{ color: '#8b949e' }}>{`// Client creates EIP-3009 permit using requirements
-const permit = await createPermit(requirements); // Using wallet`}</code>
-      </pre>
+      <h4 style={{ color: '#e6edf3' }}>4. What Happens on Each Request</h4>
+      <p>
+        Unpaid requests get HTTP 402 with a <code>PAYMENT-REQUIRED</code> header. x402 clients such as <code>@x402/fetch</code> sign a USDC authorization and retry with <code>PAYMENT-SIGNATURE</code>. The middleware verifies the payment with the facilitator, runs your handler, then settles and returns the result in the <code>PAYMENT-RESPONSE</code> header.
+      </p>
 
-      <h4 style={{ color: '#e6edf3' }}>5. Backend Settles Payment</h4>
+      <h4 style={{ color: '#e6edf3' }}>5. Keep Your API Key Server Side</h4>
       <div style={{ background: '#3d2a00', padding: '15px', borderRadius: '4px', marginBottom: '10px', border: '1px solid #ffc107' }}>
         <strong style={{ color: '#ffc107' }}>Security Critical:</strong>
         <p style={{ margin: '5px 0 0 0', color: '#ffda6a' }}>
-          Never expose your API key in client-side code! Always call the settlement endpoint from your backend server.
+          Never expose your API key in client-side code! Settlement always runs from your backend server.
         </p>
       </div>
-      <pre style={{ background: '#0d1a2d', padding: '15px', borderRadius: '4px', overflow: 'auto' }}>
-        <code style={{ color: '#8b949e' }}>{`// BACKEND ONLY: Never run this in the browser!
-const response = await fetch("${facilitatorUrl}/settle", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "X-API-Key": "${apiKey.slice(0, 16)}..." // Your API key
-  },
-  body: JSON.stringify({
-    paymentPayload: permit, // From client
-    paymentRequirements: requirements // From client
-  })
-});
-
-const result = await response.json();
-if (result.success) {
-  // Payment confirmed!
-  console.log("TX Hash:", result.txHash);
-  console.log("Merchant TX:", result.outgoingTransactionHash);
-}`}</code>
-      </pre>
 
       <h4 style={{ color: '#e6edf3' }}>6. Full Example</h4>
       <p>

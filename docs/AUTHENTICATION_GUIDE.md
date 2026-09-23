@@ -121,12 +121,29 @@ const response = await fetch('https://facilitator.example.com/settle', {
     'X-API-Key': apiKey, // ← Required
   },
   body: JSON.stringify({
+    x402Version: 2,
     paymentPayload: { /* ... */ },
     paymentRequirements: { /* ... */ },
   }),
 });
 
 const result = await response.json();
+// { success, transaction, network, payer, amount, extra: { merchantAddress, forward, feeBreakdown } }
+```
+
+With the official SDK, pass the key through `HTTPFacilitatorClient`. The SDK requires a per-endpoint object, and only `/settle` needs the key:
+
+```typescript
+import { HTTPFacilitatorClient } from '@x402/core/server';
+
+const facilitatorClient = new HTTPFacilitatorClient({
+  url: 'https://facilitator.example.com',
+  createAuthHeaders: async () => ({
+    verify: {},
+    settle: { 'X-API-Key': apiKey },
+    supported: {},
+  }),
+});
 ```
 
 ### Admin: Executing Refund
@@ -356,22 +373,22 @@ Set up alerts for:
 curl -X POST http://localhost:3002/settle \
   -H "Content-Type: application/json" \
   -H "X-API-Key: valid-key-here" \
-  -d '{ "paymentPayload": {...}, "paymentRequirements": {...} }'
+  -d '{ "x402Version": 2, "paymentPayload": {...}, "paymentRequirements": {...} }'
 
-# Expected: 200 OK (or 400 if invalid payment)
+# Expected: 200 OK with success true or false (400 if the request body is malformed)
 
 # Invalid API key
 curl -X POST http://localhost:3002/settle \
   -H "Content-Type: application/json" \
   -H "X-API-Key: invalid-key" \
-  -d '{ "paymentPayload": {...}, "paymentRequirements": {...} }'
+  -d '{ "x402Version": 2, "paymentPayload": {...}, "paymentRequirements": {...} }'
 
 # Expected: 401 Unauthorized
 
 # Missing API key
 curl -X POST http://localhost:3002/settle \
   -H "Content-Type: application/json" \
-  -d '{ "paymentPayload": {...}, "paymentRequirements": {...} }'
+  -d '{ "x402Version": 2, "paymentPayload": {...}, "paymentRequirements": {...} }'
 
 # Expected: 401 Unauthorized
 ```

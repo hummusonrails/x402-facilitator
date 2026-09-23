@@ -1,113 +1,64 @@
-import type { Address } from 'viem';
+import type { Address, Hex } from 'viem';
 import { z } from 'zod';
 
-// EIP-3009 Transfer with Authorization types
+// Wire types for the facilitator API come straight from @x402/core so they track the spec.
+export type {
+  VerifyResponse,
+  SettleResponse,
+  SupportedKind,
+  SupportedResponse,
+  PaymentRequired,
+  PaymentRequirements,
+  PaymentPayload,
+  ResourceInfo,
+} from '@x402/core/types';
+
+// EIP-3009 authorization as carried in an exact EVM payload
 export interface EIP3009Authorization {
   from: Address;
   to: Address;
-  value: string;
-  validAfter: number;
-  validBefore: number;
-  nonce: `0x${string}`;
+  value: bigint;
+  validAfter: bigint;
+  validBefore: bigint;
+  nonce: Hex;
 }
 
-export interface EIP3009Signature {
-  v: number;
-  r: `0x${string}`;
-  s: `0x${string}`;
-}
-
-// Payment payload - network is now dynamic
-export interface PaymentPayload {
-  x402Version?: number;
+// Version-independent view of a verify/settle request. v1 and v2 requests are
+// both normalized into this shape (CAIP-2 network, `amount` rather than
+// `maxAmountRequired`) before any checks run.
+export interface NormalizedRequirements {
   scheme: string;
   network: string;
-  payload: {
-    from: string;
-    to: string;
-    value: string;
-    validAfter: number;
-    validBefore: number;
-    nonce: string;
-    v: number;
-    r: string;
-    s: string;
-  };
-}
-
-// Payment requirements
-export interface PaymentRequirements {
-  scheme: string;
-  network: string;
-  token: string;
   amount: string;
-  recipient: string; // In fee model, this is the facilitator address
-  description: string;
+  asset: string;
+  payTo: string;
   maxTimeoutSeconds: number;
-  merchantAddress?: string; // Optional: final destination merchant (for fee model)
+  extra: Record<string, unknown>;
 }
 
-// Request/Response types
-export interface VerifyRequest {
-  paymentPayload: PaymentPayload;
-  paymentRequirements: PaymentRequirements;
+export interface NormalizedPayment {
+  x402Version: 1 | 2;
+  // What the client says it accepted (v2 `accepted`, or v1 top-level scheme/network)
+  accepted: { scheme: string; network: string; amount?: string; asset?: string; payTo?: string; extra: Record<string, unknown> };
+  requirements: NormalizedRequirements;
+  authorization: EIP3009Authorization;
+  signature: Hex;
 }
 
-export interface VerifyResponse {
-  valid: boolean;
-  invalidReason?: string;
-}
+// Exact EVM payload using the eip3009 asset transfer method
+const uintString = z.union([z.string().regex(/^\d+$/), z.number().int().nonnegative()]).transform((v) => BigInt(v));
 
-export interface SettleRequest {
-  paymentPayload: PaymentPayload;
-  paymentRequirements: PaymentRequirements;
-}
-
-export interface SettleResponse {
-  success: boolean;
-  txHash?: string;
-  meta?: {
-    journalId?: string;
-    grossAmount?: string;
-    feeAmount?: string;
-    merchantNet?: string;
-    forwardTxHash?: string;
-    incomingTxHash?: string;
-    outgoingTxHash?: string;
-    blockNumber?: number;
-    status?: string;
-  };
-  transactionHash?: string;
-  incomingTransactionHash?: string;
-  outgoingTransactionHash?: string;
-  blockNumber?: number;
-  status?: 'confirmed' | 'pending';
-  merchantAddress?: string;
-  error?: string;
-  feeBreakdown?: {
-    merchantAmount: string;
-    serviceFee: string;
-    gasFee: string;
-    totalAmount: string;
-  };
-}
-
-export interface SupportedPaymentKind {
-  x402Version: number;
-  scheme: 'exact';
-  network: string;
-  payTo?: string;
-}
-
-export interface SupportedResponse {
-  kinds: SupportedPaymentKind[];
-  versions?: Record<string, { kinds: SupportedPaymentKind[] }>;
-  signingAddresses?: {
-    settlement: string;
-    refund?: string;
-  };
-  extensions?: string[];
-}
+export const ExactEvmEip3009PayloadSchema = z.object({
+  signature: z.string().regex(/^0x[0-9a-fA-F]+$/),
+  authorization: z.object({
+    from: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+    to: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+    value: uintString,
+    validAfter: uintString,
+    validBefore: uintString,
+    nonce: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
+  }),
+});
 
 export interface HealthResponse {
   status: 'ok' | 'error';
@@ -116,82 +67,17 @@ export interface HealthResponse {
   timestamp: number;
 }
 
-// Zod schemas for validation
-export const PaymentPayloadSchema = z.object({
-  x402Version: z.number().optional(),
-  scheme: z.string(),
-  network: z.string().min(1),
-  payload: z.object({
-    from: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-    to: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-    value: z.string(),
-    validAfter: z.number(),
-    validBefore: z.number(),
-    nonce: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
-    v: z.number(),
-    r: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
-    s: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
-  }),
-});
-
-export const PaymentRequirementsSchema = z.object({
-  scheme: z.string(),
-  network: z.string().min(1),
-  token: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  amount: z.string(),
-  recipient: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  description: z.string(),
-  maxTimeoutSeconds: z.number(),
-  merchantAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/).optional(),
-});
-
-export const VerifyRequestSchema = z.object({
-  paymentPayload: PaymentPayloadSchema,
-  paymentRequirements: PaymentRequirementsSchema,
-});
-
-export const SettleRequestSchema = z.object({
-  paymentPayload: PaymentPayloadSchema,
-  paymentRequirements: PaymentRequirementsSchema,
-});
-
-export interface SDKVerifyResponse {
-  valid: boolean;
-  reason: string | null;
-  meta?: {
-    journalId?: string;
-    facilitatorRecipient?: string;
-    feeBreakdown?: {
-      merchantAmount: string;
-      serviceFee: string;
-      gasFee: string;
-      totalAmount: string;
-    };
-  };
-}
-
-export interface SDKSettleResponse {
-  success: boolean;
-  txHash?: string;
-  meta?: {
-    journalId?: string;
-    grossAmount?: string;
-    feeAmount?: string;
-    merchantNet?: string;
-    forwardTxHash?: string;
-    status?: string;
-    incomingTxHash?: string;
-    outgoingTxHash?: string;
-    blockNumber?: number;
-  };
-}
-
+// Body accepted by the /requirements helper endpoint
 export interface RequirementsRequest {
   amount?: string;
   memo?: string;
-  currency?: string;
   x402Version?: number;
   version?: number;
+  resource?: {
+    url?: string;
+    description?: string;
+    mimeType?: string;
+  };
   extra?: {
     merchantAddress?: string;
     resource?: string;
@@ -199,95 +85,5 @@ export interface RequirementsRequest {
     mimeType?: string;
     outputSchema?: object;
     [key: string]: any;
-  };
-}
-
-// X402 PaymentRequirements format (for accepts array)
-export interface PaymentRequirementsAccepts {
-  scheme: string;
-  network: string;
-  maxAmountRequired: string;
-  asset: string;
-  payTo: string;
-  resource: string;
-  description: string;
-  mimeType: string; // Required per x402 validation
-  outputSchema?: object;
-  maxTimeoutSeconds: number;
-  extra?: {
-    [key: string]: any;
-  };
-}
-
-// X402 PaymentRequirementsResponse format
-export interface PaymentRequirementsResponse {
-  x402Version: number;
-  error: string;
-  accepts: PaymentRequirementsAccepts[];
-}
-
-// Zod schema for PaymentRequirementsResponse validation
-export const PaymentRequirementsAcceptsSchema = z.object({
-  scheme: z.string(),
-  network: z.string().min(1),
-  maxAmountRequired: z.string(),
-  asset: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  payTo: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  resource: z.string().url(),
-  description: z.string(),
-  mimeType: z.string(),
-  outputSchema: z.object({}).passthrough().optional(),
-  maxTimeoutSeconds: z.number(),
-  extra: z.object({}).passthrough().optional(),
-});
-
-export const PaymentRequirementsResponseSchema = z.object({
-  x402Version: z.union([z.literal(1), z.literal(2)]),
-  error: z.string(),
-  accepts: z.array(PaymentRequirementsAcceptsSchema),
-});
-
-export const SDKVerifyRequestSchema = z.object({
-  x402Version: z.number().optional(),
-  network: z.string().min(1),
-  token: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  recipient: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  amount: z.string(),
-  nonce: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
-  deadline: z.number(),
-  memo: z.string().optional(),
-  extra: z.object({
-    merchantAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-    feeMode: z.string().optional(),
-  }).passthrough().optional(),
-  permit: z.object({
-    owner: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-    spender: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-    value: z.string(),
-    deadline: z.number(),
-    sig: z.string(),
-  }),
-});
-
-export interface SDKVerifyRequest {
-  x402Version?: number;
-  network: string;
-  token: string;
-  recipient: string;
-  amount: string;
-  nonce: string;
-  deadline: number;
-  memo?: string;
-  extra?: {
-    merchantAddress: string;
-    feeMode?: string;
-    [key: string]: any;
-  };
-  permit: {
-    owner: string;
-    spender: string;
-    value: string;
-    deadline: number;
-    sig: string;
   };
 }

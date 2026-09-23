@@ -110,6 +110,7 @@ export const FACILITATOR_ADDRESS = facilitatorAccount.address as `0x${string}`;
 export const PORT = parseInt(process.env.PORT || '3002', 10);
 export const BODY_SIZE_LIMIT = '100kb';
 export const MAX_SETTLEMENT_AMOUNT = BigInt(process.env.MAX_SETTLEMENT_AMOUNT || '1000000000');
+export const SETTLEMENT_CONFIRMATION_TIMEOUT_MS = parseInt(process.env.SETTLEMENT_CONFIRMATION_TIMEOUT_MS || '180000', 10);
 export const RECOVERY_INTERVAL_MS = parseInt(process.env.RECOVERY_INTERVAL_MS || '300000', 10);
 export const SERVICE_FEE_BPS = parseInt(process.env.SERVICE_FEE_BPS || '50', 10);
 export const MAX_SERVICE_FEE_BPS = parseInt(process.env.MAX_SERVICE_FEE_BPS || '500', 10);
@@ -124,6 +125,5 @@ if (GAS_FEE_USDC > MAX_GAS_FEE_USDC) {
   throw new Error(`GAS_FEE_USDC (${GAS_FEE_USDC}) exceeds MAX_GAS_FEE_USDC (${MAX_GAS_FEE_USDC})`);
 }
 
-export const ALLOW_CLIENT_RECIPIENT = process.env.ALLOW_CLIENT_RECIPIENT === 'true';
 
 export const allNetworkConfigs = networkConfigs;
