@@ -16,6 +16,14 @@ import { isDatabaseConfigured } from './db.js';
 import { getAllMerchants } from './merchantStore.js';
 import { authenticateMerchant, authenticateAdmin, AuthenticatedRequest } from './auth.js';
 import { executeRefund } from './refund.js';
+import {
+  BAZAAR_KEY,
+  evaluateBazaarDeclaration,
+  indexBazaarResource,
+  setBazaarExtensionResponse,
+  type BazaarExtensionResponse,
+} from './bazaar.js';
+import { listDiscoveryResources, type DiscoveryResourceType } from './discoveryStore.js';
 import * as Errors from './errors.js';
 import type { SupportedKind, SupportedResponse, RequirementsRequest, PaymentRequired } from './types.js';
 
@@ -171,7 +179,8 @@ app.get('/supported', (req: Request, res: Response) => {
 
   const response: SupportedResponse = {
     kinds,
-    extensions: [],
+    // Discovery: declarations echoed in paymentPayload.extensions.bazaar are indexed on confirmed settle
+    extensions: [BAZAAR_KEY],
     // Also the required payTo address under the fee split model
     signers: { 'eip155:*': [facilitatorAddress] },
   };
@@ -225,8 +234,18 @@ app.post('/verify', async (req: Request, res: Response) => {
     });
   }
 
+  const nonceLogger = logger.child({ nonce: parsed.payment.authorization.nonce });
+
+  // Discovery is read-only here: a valid declaration is reported as processing until a settle confirms it
+  const bazaar = evaluateBazaarDeclaration(parsed.payment, nonceLogger);
+  if (bazaar.declared) {
+    setBazaarExtensionResponse(
+      res,
+      bazaar.valid ? { status: 'processing' } : { status: 'rejected', rejectedReason: bazaar.rejectedReason }
+    );
+  }
+
   try {
-    const nonceLogger = logger.child({ nonce: parsed.payment.authorization.nonce });
     const { response } = await verifyPayment(parsed.payment, nonceLogger);
     res.json(response);
   } catch (error: any) {
@@ -258,12 +277,43 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
     });
   }
 
+  const nonceLogger = logger.child({ nonce: parsed.payment.authorization.nonce, merchant: merchantAddress });
+  const bazaar = evaluateBazaarDeclaration(parsed.payment, nonceLogger);
+  let bazaarResponse: BazaarExtensionResponse | undefined;
+  if (bazaar.declared && !bazaar.valid) {
+    bazaarResponse = { status: 'rejected', rejectedReason: bazaar.rejectedReason };
+  }
+
   try {
-    const nonceLogger = logger.child({ nonce: parsed.payment.authorization.nonce, merchant: merchantAddress });
-    const result = await settlePayment(parsed.payment, merchantAddress, nonceLogger);
+    const result = await settlePayment(parsed.payment, merchantAddress, nonceLogger, {
+      // Runs only after the payer's transfer is confirmed, so unpaid declarations are never indexed
+      onIncomingConfirmed: async () => {
+        if (!bazaar.declared || !bazaar.valid) return;
+        if (!isDatabaseConfigured()) {
+          nonceLogger.warn('Bazaar declaration not indexed: database not configured');
+          bazaarResponse = { status: 'rejected', rejectedReason: 'discovery index unavailable' };
+          return;
+        }
+        try {
+          await indexBazaarResource(bazaar.resource, parsed.payment, merchantAddress, nonceLogger);
+          bazaarResponse = { status: 'success' };
+        } catch (error: any) {
+          nonceLogger.error('Bazaar indexing failed', { error: error.message });
+          bazaarResponse = { status: 'processing' };
+        }
+      },
+    });
+
+    if (bazaar.declared && bazaar.valid && !bazaarResponse) {
+      bazaarResponse = result.errorReason === Errors.ErrSettlementPending
+        ? { status: 'processing' }
+        : { status: 'rejected', rejectedReason: 'payment did not settle' };
+    }
+    setBazaarExtensionResponse(res, bazaarResponse);
     res.json(result);
   } catch (error: any) {
     logger.error('Settle endpoint error', { error: error.message });
+    setBazaarExtensionResponse(res, bazaarResponse);
     res.status(500).json({
       success: false,
       errorReason: Errors.ErrUnexpectedSettleError,
@@ -271,6 +321,61 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
       transaction: '',
       network: config.network,
     });
+  }
+});
+
+const DISCOVERY_DEFAULT_LIMIT = 20;
+const DISCOVERY_MAX_LIMIT = 100;
+
+function parseNonNegativeInt(value: unknown, fallback: number): number | null {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+  return parseInt(value, 10);
+}
+
+// Bazaar catalog. Public and unauthenticated, like the reference facilitator's endpoint.
+app.get('/discovery/resources', async (req: Request, res: Response) => {
+  const logger = (req as any).logger;
+
+  const typeParam = req.query.type;
+  let type: DiscoveryResourceType | undefined;
+  if (typeParam !== undefined) {
+    if (typeParam !== 'http' && typeParam !== 'mcp') {
+      return res.status(400).json({ error: 'Invalid type', message: 'type must be "http" or "mcp"' });
+    }
+    type = typeParam;
+  }
+
+  const limit = parseNonNegativeInt(req.query.limit, DISCOVERY_DEFAULT_LIMIT);
+  const offset = parseNonNegativeInt(req.query.offset, 0);
+  if (limit === null || limit < 1 || limit > DISCOVERY_MAX_LIMIT) {
+    return res.status(400).json({ error: 'Invalid limit', message: `limit must be an integer between 1 and ${DISCOVERY_MAX_LIMIT}` });
+  }
+  if (offset === null) {
+    return res.status(400).json({ error: 'Invalid offset', message: 'offset must be a non-negative integer' });
+  }
+
+  const stringFilter = (value: unknown): string | undefined => (typeof value === 'string' && value.length > 0 ? value : undefined);
+  const payTo = stringFilter(req.query.payTo);
+  const scheme = stringFilter(req.query.scheme);
+  const network = stringFilter(req.query.network);
+
+  if (!isDatabaseConfigured()) {
+    logger.warn('GET /discovery/resources unavailable: database not configured');
+    return res.status(503).json({ error: 'Discovery unavailable', message: 'Discovery index requires a database' });
+  }
+
+  try {
+    const { items, total } = await listDiscoveryResources({ type, payTo, scheme, network, limit, offset });
+    logger.info('GET /discovery/resources', { type, payTo, scheme, network, limit, offset, returned: items.length, total });
+    res.json({
+      x402Version: 2,
+      items,
+      pagination: { limit, offset, total },
+    });
+  } catch (error: any) {
+    logger.error('Discovery listing error', { error: error.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -395,6 +500,7 @@ async function startServer() {
       console.log(`  GET  http://localhost:${PORT}/requirements    - Get default payment requirements`);
       console.log(`  POST http://localhost:${PORT}/requirements    - Generate payment requirements`);
       console.log(`  POST http://localhost:${PORT}/verify          - Verify payment payload`);
+      console.log(`  GET  http://localhost:${PORT}/discovery/resources - Bazaar discovery catalog`);
       console.log('');
       console.log('Authenticated Endpoints:');
       console.log(`  POST http://localhost:${PORT}/settle          - Execute payment settlement (merchant)`);
