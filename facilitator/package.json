@@ -12,12 +12,15 @@
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
     "check": "tsc --noEmit",
+    "test": "vitest run",
+    "migrate": "tsx scripts/apply-migration.ts",
     "clean": "rm -rf dist",
     "generate-api-key": "tsx scripts/generate-api-key.ts",
     "merchants": "tsx scripts/manage-merchants.ts"
   },
   "dependencies": {
     "@x402/core": "^2.27.0",
+    "@x402/extensions": "^2.27.0",
     "bcrypt": "^6.0.0",
     "dotenv": "^16.4.5",
     "express": "^4.18.2",
@@ -33,7 +36,8 @@
     "@types/node": "^20.16.5",
     "@types/pg": "^8.15.6",
     "tsx": "^4.19.1",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^3.2.4"
   },
   "engines": {
     "node": ">=20.0.0",

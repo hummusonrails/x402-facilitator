@@ -5,6 +5,7 @@ import {
   PaymentRequirementsV1Schema,
   PaymentRequirementsV2Schema,
 } from '@x402/core/schemas';
+import type { PaymentPayload, PaymentRequirements, PaymentRequirementsV1 } from '@x402/core/types';
 import { normalizeNetworkId } from './config.js';
 import { ExactEvmEip3009PayloadSchema, type NormalizedPayment } from './types.js';
 import * as Errors from './errors.js';
@@ -56,6 +57,9 @@ export function parseFacilitatorRequest(body: unknown): ParseResult {
   let accepted: NormalizedPayment['accepted'];
   let requirements: NormalizedPayment['requirements'];
   let schemePayload: unknown;
+  let resource: NormalizedPayment['resource'];
+  let extensions: NormalizedPayment['extensions'];
+  let raw: NormalizedPayment['raw'];
 
   if (payloadVersion === 2) {
     const p = PaymentPayloadV2Schema.safeParse(paymentPayload);
@@ -84,6 +88,9 @@ export function parseFacilitatorRequest(body: unknown): ParseResult {
       extra: r.data.extra ?? {},
     };
     schemePayload = p.data.payload;
+    resource = p.data.resource ?? undefined;
+    extensions = p.data.extensions ?? undefined;
+    raw = { paymentPayload: p.data as PaymentPayload, paymentRequirements: r.data as PaymentRequirements };
   } else {
     const p = PaymentPayloadV1Schema.safeParse(paymentPayload);
     if (!p.success) {
@@ -108,6 +115,7 @@ export function parseFacilitatorRequest(body: unknown): ParseResult {
       extra: r.data.extra ?? {},
     };
     schemePayload = p.data.payload;
+    raw = { paymentPayload: p.data as unknown as PaymentPayload, paymentRequirements: r.data as PaymentRequirementsV1 };
   }
 
   const network = requirements.network;
@@ -144,6 +152,9 @@ export function parseFacilitatorRequest(body: unknown): ParseResult {
         nonce: e.data.authorization.nonce as Hex,
       },
       signature: e.data.signature as Hex,
+      resource,
+      extensions,
+      raw,
     },
   };
 }
