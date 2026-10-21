@@ -1,15 +1,26 @@
-import { createPublicClient, createWalletClient, http, type Hex } from 'viem';
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  type Account,
+  type Chain,
+  type Hex,
+  type PublicClient,
+  type Transport,
+  type WalletClient,
+} from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { config, FACILITATOR_PRIVATE_KEY } from './config.js';
 
 export const facilitatorAccount = privateKeyToAccount(FACILITATOR_PRIVATE_KEY);
 
-export const publicClient = createPublicClient({
+// Explicit annotations keep `pnpm build` declaration emit portable across viem minor versions
+export const publicClient: PublicClient<Transport, Chain> = createPublicClient({
   chain: config.chain,
   transport: http(config.rpcUrl),
 });
 
-export const walletClient = createWalletClient({
+export const walletClient: WalletClient<Transport, Chain, Account> = createWalletClient({
   account: facilitatorAccount,
   chain: config.chain,
   transport: http(config.rpcUrl),
