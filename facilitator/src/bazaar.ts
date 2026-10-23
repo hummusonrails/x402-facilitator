@@ -56,14 +56,23 @@ function cap(value: string | undefined, limit: number): string | undefined {
 }
 
 /**
+ * Whether the payload carries a bazaar declaration at all. The single definition of
+ * "declared": /settle uses it to decide whether to pass settle hooks, and
+ * evaluateBazaarDeclaration uses it for `declared`, so the two cannot disagree.
+ */
+export function hasBazaarDeclaration(payment: NormalizedPayment): boolean {
+  return payment.extensions?.[BAZAAR_KEY] !== undefined;
+}
+
+/**
  * Validate the bazaar declaration echoed in a payment payload, without side effects.
  * Returns `declared: false` when the payload carries no bazaar extension.
  */
 export async function evaluateBazaarDeclaration(payment: NormalizedPayment, logger: Logger): Promise<BazaarEvaluation> {
-  const declaration = payment.extensions?.[BAZAAR_KEY];
-  if (declaration === undefined) {
+  if (!hasBazaarDeclaration(payment)) {
     return { declared: false };
   }
+  const declaration = payment.extensions![BAZAAR_KEY];
 
   const reject = (rejectedReason: string): BazaarEvaluation => {
     logger.warn('Bazaar declaration rejected', { rejectedReason });

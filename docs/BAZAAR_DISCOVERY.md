@@ -114,11 +114,12 @@ sequenceDiagram
   Seller-->>Agent: 200 response
 
   Seller->>Fac: POST /settle (X-API-Key)
+  Note over Fac: evaluateBazaarDeclaration() starts,<br/>not awaited: settlement does not wait on it
   Fac->>DB: claim nonce (advisory lock)
   Fac->>Chain: transferWithAuthorization(buyer → facilitator)
   Chain-->>Fac: receipt + Transfer event
   Fac->>DB: status = incoming_complete
-  Note over Fac: onIncomingConfirmed hook →<br/>indexBazaarResource()
+  Note over Fac: onIncomingConfirmed hook → verdict<br/>(waits ≤ DISCOVERY_SCHEMA_TIMEOUT_MS) → indexBazaarResource()
   Fac->>DB: UPSERT discovery_resources (resource_url, tool_name)
   Fac->>Chain: transfer(merchant share)
   Fac-->>Seller: 200 success, tx hashes + EXTENSION-RESPONSES {bazaar: success}
@@ -134,9 +135,10 @@ sequenceDiagram
    well-formed `accepts`) and reports the outcome to the seller in the `EXTENSION-RESPONSES` header
    (`processing` or `rejected` with a reason). Payment verification is unaffected by the outcome.
 5. The seller does the work and answers the buyer.
-6. `/settle` submits `transferWithAuthorization`, waits for the receipt and the expected `Transfer` event, and only
-   then upserts `discovery_resources`. The header reports `success`. A declaration attached to a payment that never
-   lands is never indexed.
+6. `/settle` starts validating the declaration and, without waiting for it, submits `transferWithAuthorization`.
+   Once the receipt and the expected `Transfer` event are in, the settle hook takes the verdict and only then upserts
+   `discovery_resources`. The header reports `success`. A declaration attached to a payment that never lands is never
+   indexed, and gets no verdict either (see "Settlement never waits on discovery" below).
 
 ## Hardening the declaration path
 
@@ -160,6 +162,19 @@ declaration is bad would condemn honest sellers whenever the box is busy, and it
 nothing — the row is not indexed either way and the payment is untouched. Worker startup
 (~100ms to spawn the thread and load the SDK) is deliberately not charged against the
 validation budget, for the same reason.
+
+**Settlement never waits on discovery.** The validator queue is
+shared with unauthenticated `/verify`, so on `/settle` the evaluation starts alongside the settlement instead of
+before it, and the payer's transfer is submitted without waiting for a verdict. The verdict is awaited only in the
+post-confirmation hook, which sits before the merchant forward, and only for up to `DISCOVERY_SCHEMA_TIMEOUT_MS`.
+Normally it arrived long before the transfer confirmed and is reported as is (`rejected` with its reason, or
+indexed and `success`). If the queue is backed up and the deadline passes, the header says `processing` and nothing
+is indexed, so a saturated validator costs a settlement at most one validation budget, after the payment has landed.
+
+The verdict is tied to the payment. If the payment fails, `/settle` sends no `bazaar` status at all, even for a
+malformed declaration; while it is still pending (`settlement_pending`) the status is `processing`. Reporting a
+verdict there would mean waiting on the validator for a payment that did not happen. This matches `/verify`, which
+reports nothing for a payload that does not verify.
 
 **`/verify` evaluates nothing until the payment verifies.** Schema work costs real CPU and
 the route takes no authentication, so an unsigned payload must not be able to spend it.
@@ -208,11 +223,12 @@ Two rules limit the damage:
 
 ## Known limitations
 
-Two gaps are known and deliberately not yet closed. Neither affects payments; both affect how reliably a declaration
+Two gaps are known and deliberately not yet closed. Neither delays a payment; both affect how reliably a declaration
 makes it into the catalog under load.
 
-**A deferred declaration is lost permanently.** When the schema validator is saturated or a validation times out,
-the declaration is reported `processing` and the settle carries on: the payment confirms and the nonce is consumed.
+**A deferred declaration is lost permanently.** When the schema validator is saturated, a validation times out, or
+the verdict misses the settle hook's deadline, the declaration is reported `processing` and the settle carries on: the
+payment confirms and the nonce is consumed.
 Nothing persists the pending declaration, so it is never indexed and there is no retry path. `processing` here does
 not mean "will arrive later"; the seller has to settle another payment carrying the declaration for it to be
 catalogued. Closing this means storing the declaration beside the payment row and teaching the recovery worker
@@ -223,8 +239,9 @@ facilitator does not hit this path; a third-party declaration under load can.
 (`MAX_QUEUE_DEPTH` in `src/schemaGuard.ts`) serve both unauthenticated `/verify` and authenticated `/settle`.
 `/verify` does not consume the nonce, so a single validly signed payload carrying a declaration with a backtracking
 `pattern` can be replayed against `/verify` to keep the queue full. Each replay costs the facilitator up to
-`DISCOVERY_SCHEMA_TIMEOUT_MS` of worker time, and real settlements arriving meanwhile get `unavailable`, are
-reported `processing`, and are then lost as described above. The rate limiter is the only thing bounding this today.
+`DISCOVERY_SCHEMA_TIMEOUT_MS` of worker time, and declarations on real settlements arriving meanwhile get
+`unavailable` or miss the hook's deadline, are reported `processing`, and are then lost as described above. The
+settlements themselves are not held up. The rate limiter is the only thing bounding this today.
 The remedy (separate queues per trust level, or a per-caller budget) is an open design decision.
 
 ## Files

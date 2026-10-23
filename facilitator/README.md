@@ -98,7 +98,9 @@ pnpm migrate migrations/006_discovery_resources.sql
 The migration is idempotent, so re-running it is harmless. Until it is applied, `/settle` still settles payments normally (indexing failures never fail a payment) and `GET /discovery/resources` returns 503.
 
 #### `EXTENSION-RESPONSES` header
-When a request carries a `bazaar` declaration, `/verify` and `/settle` add the facilitator-to-server sidechannel header defined in spec section 7.2.1: base64 JSON keyed by extension name. For `bazaar` it holds `status` (`success` once indexed, `processing` while the payment is unconfirmed or indexing is deferred, `rejected` when the declaration was dropped or the key belongs to another merchant) and `rejectedReason` on rejection. A rejected declaration never fails the payment. The header is absent when no declaration was sent, and when a valid declaration rode on a payment that failed for unrelated reasons (nothing to say about the declaration).
+When a request carries a `bazaar` declaration, `/verify` and `/settle` add the facilitator-to-server sidechannel header defined in spec section 7.2.1: base64 JSON keyed by extension name. For `bazaar` it holds `status` (`success` once indexed, `processing` while the payment is unconfirmed or indexing is deferred, `rejected` when the declaration was dropped or the key belongs to another merchant) and `rejectedReason` on rejection. A rejected declaration never fails the payment. The header is absent when no declaration was sent.
+
+On `/settle` the verdict is tied to the payment. Validation starts alongside the settlement rather than before it, so the payment never waits on the validator, and the verdict is read once the payer's transfer confirms, waiting at most `DISCOVERY_SCHEMA_TIMEOUT_MS`. If it is in by then (the normal case) it is reported as is; if not, the status is `processing`. When the payment fails `/settle` sends no `bazaar` status, even for a malformed declaration, and while it is pending (`settlement_pending`) the status is `processing`.
 
 On `/verify` the declaration is evaluated only once the payment itself verifies. Validating a declaration means compiling and running a JSON Schema the caller supplied, and `/verify` is unauthenticated, so an unsigned payload gets no header and buys no schema work.
 
@@ -113,7 +115,7 @@ The declaration reaching `/verify` and `/settle` is attacker-controlled on both 
 
 #### Known limitations
 - **A deferred declaration is never indexed.** If the schema validator is saturated or times out, the header says `processing`, the payment still settles, and the declaration is dropped: nothing persists it and nothing retries it. It is only catalogued if a later settlement carries it again.
-- **`/verify` and `/settle` share one schema validation queue.** `/verify` is unauthenticated and does not consume the nonce, so a replayed payload with a slow schema can fill the queue and push real settlements onto the deferred path above.
+- **`/verify` and `/settle` share one schema validation queue.** `/verify` is unauthenticated and does not consume the nonce, so a replayed payload with a slow schema can fill the queue and push declarations on real settlements onto the deferred path above. The settlements themselves are not delayed.
 
 Details in [`../docs/BAZAAR_DISCOVERY.md`](../docs/BAZAAR_DISCOVERY.md#known-limitations).
 
