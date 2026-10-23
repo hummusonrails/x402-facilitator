@@ -61,7 +61,7 @@ Returns the supported payment kinds and the facilitator signer, which is also th
 ### `GET /discovery/resources`
 Only served when `DISCOVERY_ENABLED=true`; otherwise the route does not exist (404). Bazaar catalog of resources that have settled through this facilitator with a valid `bazaar` declaration. Public, no auth. Same shape as the reference facilitator so `withBazaar(new HTTPFacilitatorClient(...)).extensions.bazaar.listResources()` works unchanged.
 
-Query parameters, all optional: `type` (`http` | `mcp`), `payTo`, `scheme`, `network`, `limit` (1 to 100, default 20), `offset` (default 0).
+Query parameters, all optional: `type` (`http` | `mcp`), `payTo`, `scheme`, `network`, `limit` (1 to 100, default 20), `offset` (default 0). Under the fee-split model `payTo` is always the facilitator address, so it does not filter by seller.
 
 **Response:**
 ```json

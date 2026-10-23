@@ -235,7 +235,9 @@ Two rules limit the damage:
   newest one wins, so the row always advertises the terms the resource most recently settled on. Accumulating would
   leave superseded prices discoverable, and an agent reading a stale entry would sign an authorization the resource
   server's own 402 no longer accepts. A row therefore shows one requirement rather than every network a seller
-  supports; filtering by `network`, `scheme` or `payTo` matches against it.
+  supports; filtering by `network`, `scheme` or `payTo` matches against it. Under this facilitator's fee-split model
+  `payTo` is always the facilitator's own address (`/verify` rejects anything else), so filtering on it does not
+  narrow results by seller: it matches every entry or none.
 
 ## Known limitations
 
@@ -270,6 +272,6 @@ The remedy (separate queues per trust level, or a per-caller budget) is an open 
 | Catalog table access | `facilitator/src/discoveryStore.ts` |
 | Table definition | `facilitator/migrations/006_discovery_resources.sql` |
 | Post-confirmation hook | `facilitator/src/settle.ts` (`SettleHooks.onIncomingConfirmed`) |
+| Operator tool: list and delete catalog entries | `facilitator/scripts/manage-discovery.ts` (`pnpm discovery`) |
 | Routes: `/supported`, `/verify`, `/settle`, `/discovery/resources` | `facilitator/src/server.ts` |
 | Carrying `resource` and `extensions` through parsing | `facilitator/src/x402.ts`, `facilitator/src/types.ts` |
-| Operator tool: list and delete catalog entries | `facilitator/scripts/manage-discovery.ts` (`pnpm discovery`) |
