@@ -1,8 +1,16 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, { Request, Response, NextFunction, type Express } from 'express';
 import rateLimit from 'express-rate-limit';
 import { Address } from 'viem';
 import { encodePaymentRequiredHeader } from '@x402/core/http';
-import { config, FACILITATOR_ADDRESS, PORT, BODY_SIZE_LIMIT, RECOVERY_INTERVAL_MS } from './config.js';
+import {
+  config,
+  FACILITATOR_ADDRESS,
+  PORT,
+  BODY_SIZE_LIMIT,
+  RECOVERY_INTERVAL_MS,
+  DISCOVERY_ENABLED,
+  DISCOVERY_SCHEMA_TIMEOUT_MS,
+} from './config.js';
 import { publicClient } from './clients.js';
 import { parseFacilitatorRequest } from './x402.js';
 import { verifyPayment } from './verify.js';
@@ -16,10 +24,42 @@ import { isDatabaseConfigured } from './db.js';
 import { getAllMerchants } from './merchantStore.js';
 import { authenticateMerchant, authenticateAdmin, AuthenticatedRequest } from './auth.js';
 import { executeRefund } from './refund.js';
+import {
+  BAZAAR_KEY,
+  REJECTED_CLAIMED_BY_OTHER,
+  evaluateBazaarDeclaration,
+  hasBazaarDeclaration,
+  indexBazaarResource,
+  setBazaarExtensionResponse,
+  type BazaarExtensionResponse,
+} from './bazaar.js';
+import { listDiscoveryResources, type DiscoveryResourceType } from './discoveryStore.js';
 import * as Errors from './errors.js';
 import type { SupportedKind, SupportedResponse, RequirementsRequest, PaymentRequired } from './types.js';
+import type { BazaarEvaluation } from './bazaar.js';
 
-const app = express();
+/**
+ * Wire status for a declaration that has not been indexed yet. A declaration we reached no
+ * verdict on reports `processing`, never `rejected`: saturation is our problem, not a
+ * finding about the declaration.
+ */
+function bazaarStatusFor(evaluation: BazaarEvaluation): BazaarExtensionResponse | undefined {
+  if (!evaluation.declared) return undefined;
+  if (evaluation.valid) return { status: 'processing' };
+  if ('deferred' in evaluation) return { status: 'processing' };
+  return { status: 'rejected', rejectedReason: evaluation.rejectedReason };
+}
+
+/** Resolves to the promise's value, or to undefined if it has not settled within `ms`. */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+const app: Express = express();
 
 app.use(express.json({ limit: BODY_SIZE_LIMIT }));
 app.use(express.static('public'));
@@ -171,7 +211,9 @@ app.get('/supported', (req: Request, res: Response) => {
 
   const response: SupportedResponse = {
     kinds,
-    extensions: [],
+    // Discovery: declarations echoed in paymentPayload.extensions.bazaar are indexed on confirmed settle.
+    // Without a database there is no index, so do not advertise what settle would reject.
+    extensions: DISCOVERY_ENABLED && isDatabaseConfigured() ? [BAZAAR_KEY] : [],
     // Also the required payTo address under the fee split model
     signers: { 'eip155:*': [facilitatorAddress] },
   };
@@ -225,9 +267,22 @@ app.post('/verify', async (req: Request, res: Response) => {
     });
   }
 
+  const nonceLogger = logger.child({ nonce: parsed.payment.authorization.nonce });
+
   try {
-    const nonceLogger = logger.child({ nonce: parsed.payment.authorization.nonce });
     const { response } = await verifyPayment(parsed.payment, nonceLogger);
+
+    // Evaluating a declaration costs real CPU (JSON Schema compile and match), and this
+    // route is unauthenticated, so it happens only once the payment itself checks out.
+    // An unsigned payload therefore buys no schema work at all. Discovery is read-only
+    // here: a valid declaration is reported as processing until a settle confirms it.
+    if (DISCOVERY_ENABLED && response.isValid) {
+      const bazaar = await evaluateBazaarDeclaration(parsed.payment, nonceLogger);
+      if (bazaar.declared) {
+        setBazaarExtensionResponse(res, bazaarStatusFor(bazaar));
+      }
+    }
+
     res.json(response);
   } catch (error: any) {
     logger.error('Verify endpoint error', { error: error.message });
@@ -258,12 +313,67 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
     });
   }
 
+  let bazaarResponse: BazaarExtensionResponse | undefined;
+
   try {
     const nonceLogger = logger.child({ nonce: parsed.payment.authorization.nonce, merchant: merchantAddress });
-    const result = await settlePayment(parsed.payment, merchantAddress, nonceLogger);
+
+    // Started, not awaited: the payment never waits on the schema validator, whose queue is
+    // shared with the unauthenticated /verify. The catch is attached as the promise is
+    // created, so a rejection cannot go unhandled before the hook gets to await it.
+    const evaluation: Promise<BazaarEvaluation> | undefined =
+      DISCOVERY_ENABLED && hasBazaarDeclaration(parsed.payment)
+        ? evaluateBazaarDeclaration(parsed.payment, nonceLogger).catch((error: any): BazaarEvaluation => {
+            nonceLogger.error('Bazaar evaluation failed', { error: error.message });
+            return { declared: true, valid: false, deferred: true };
+          })
+        : undefined;
+
+    // With discovery off, or no declaration, no hooks are passed, so settlement runs exactly as it does without the extension
+    const result = await settlePayment(parsed.payment, merchantAddress, nonceLogger, evaluation ? {
+      // Runs only after the payer's transfer is confirmed, so unpaid declarations are never indexed
+      onIncomingConfirmed: async () => {
+        // The hook sits before the merchant forward, so wait at most one validation budget.
+        // Normally the verdict is long since in; only a backed-up queue misses the deadline.
+        const bazaar = await withDeadline(evaluation, DISCOVERY_SCHEMA_TIMEOUT_MS);
+        if (!bazaar) {
+          nonceLogger.warn('Bazaar verdict not ready by the deadline, not indexing');
+          bazaarResponse = { status: 'processing' };
+          return;
+        }
+        if (!bazaar.declared) return;
+        if (!bazaar.valid) {
+          bazaarResponse = bazaarStatusFor(bazaar);
+          return;
+        }
+        if (!isDatabaseConfigured()) {
+          nonceLogger.warn('Bazaar declaration not indexed: database not configured');
+          bazaarResponse = { status: 'rejected', rejectedReason: 'discovery index unavailable' };
+          return;
+        }
+        try {
+          const outcome = await indexBazaarResource(bazaar.resource, parsed.payment, merchantAddress, nonceLogger);
+          bazaarResponse = outcome === 'claimed_by_other'
+            ? { status: 'rejected', rejectedReason: REJECTED_CLAIMED_BY_OTHER }
+            : { status: 'success' };
+        } catch (error: any) {
+          nonceLogger.error('Bazaar indexing failed', { error: error.message });
+          bazaarResponse = { status: 'processing' };
+        }
+      },
+    } : undefined);
+
+    // The hook never ran: the payment did not confirm, so no verdict is reported for the
+    // declaration. A pending broadcast may still land (retry reconciles it), so say
+    // processing; a terminal payment failure gets no bazaar status at all.
+    if (evaluation && !bazaarResponse && result.errorReason === Errors.ErrSettlementPending) {
+      bazaarResponse = { status: 'processing' };
+    }
+    setBazaarExtensionResponse(res, bazaarResponse);
     res.json(result);
   } catch (error: any) {
     logger.error('Settle endpoint error', { error: error.message });
+    setBazaarExtensionResponse(res, bazaarResponse);
     res.status(500).json({
       success: false,
       errorReason: Errors.ErrUnexpectedSettleError,
@@ -271,6 +381,76 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
       transaction: '',
       network: config.network,
     });
+  }
+});
+
+const DISCOVERY_DEFAULT_LIMIT = 20;
+const DISCOVERY_MAX_LIMIT = 100;
+// Postgres OFFSET is a bigint; anything larger errors out of the driver as a 500
+const DISCOVERY_MAX_OFFSET = 1_000_000;
+
+function parseNonNegativeInt(value: unknown, fallback: number): number | null {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+  return parseInt(value, 10);
+}
+
+// Bazaar catalog. Public and unauthenticated, like the reference facilitator's endpoint.
+// With discovery off the route falls through to the 404 handler, as if it did not exist.
+app.get('/discovery/resources', async (req: Request, res: Response, next: NextFunction) => {
+  if (!DISCOVERY_ENABLED) return next();
+  const logger = (req as any).logger;
+
+  const typeParam = req.query.type;
+  let type: DiscoveryResourceType | undefined;
+  if (typeParam !== undefined) {
+    if (typeParam !== 'http' && typeParam !== 'mcp') {
+      return res.status(400).json({ error: 'Invalid type', message: 'type must be "http" or "mcp"' });
+    }
+    type = typeParam;
+  }
+
+  const limit = parseNonNegativeInt(req.query.limit, DISCOVERY_DEFAULT_LIMIT);
+  const offset = parseNonNegativeInt(req.query.offset, 0);
+  if (limit === null || limit < 1 || limit > DISCOVERY_MAX_LIMIT) {
+    return res.status(400).json({ error: 'Invalid limit', message: `limit must be an integer between 1 and ${DISCOVERY_MAX_LIMIT}` });
+  }
+  if (offset === null || offset > DISCOVERY_MAX_OFFSET) {
+    return res.status(400).json({
+      error: 'Invalid offset',
+      message: `offset must be an integer between 0 and ${DISCOVERY_MAX_OFFSET}`,
+    });
+  }
+
+  const stringFilter = (value: unknown): string | undefined => (typeof value === 'string' && value.length > 0 ? value : undefined);
+  const payTo = stringFilter(req.query.payTo);
+  const scheme = stringFilter(req.query.scheme);
+  const network = stringFilter(req.query.network);
+
+  if (!isDatabaseConfigured()) {
+    logger.warn('GET /discovery/resources unavailable: database not configured');
+    return res.status(503).json({ error: 'Discovery unavailable', message: 'Discovery index requires a database' });
+  }
+
+  try {
+    const { items, total } = await listDiscoveryResources({ type, payTo, scheme, network, limit, offset });
+    logger.info('GET /discovery/resources', { type, payTo, scheme, network, limit, offset, returned: items.length, total });
+    res.json({
+      x402Version: 2,
+      items,
+      pagination: { limit, offset, total },
+    });
+  } catch (error: any) {
+    // 42P01 = undefined_table: migration 006 has not been applied to this database
+    if (error.code === '42P01') {
+      logger.error('Discovery table missing; apply migrations/006_discovery_resources.sql');
+      return res.status(503).json({
+        error: 'Discovery unavailable',
+        message: 'Discovery index is not initialized',
+      });
+    }
+    logger.error('Discovery listing error', { error: error.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -395,6 +575,9 @@ async function startServer() {
       console.log(`  GET  http://localhost:${PORT}/requirements    - Get default payment requirements`);
       console.log(`  POST http://localhost:${PORT}/requirements    - Generate payment requirements`);
       console.log(`  POST http://localhost:${PORT}/verify          - Verify payment payload`);
+      if (DISCOVERY_ENABLED) {
+        console.log(`  GET  http://localhost:${PORT}/discovery/resources - Bazaar discovery catalog`);
+      }
       console.log('');
       console.log('Authenticated Endpoints:');
       console.log(`  POST http://localhost:${PORT}/settle          - Execute payment settlement (merchant)`);
@@ -408,4 +591,8 @@ async function startServer() {
   }
 }
 
-startServer();
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
+
+export { app };
