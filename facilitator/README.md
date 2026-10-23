@@ -85,7 +85,7 @@ Query parameters, all optional: `type` (`http` | `mcp`), `payTo`, `scheme`, `net
 }
 ```
 
-A resource is indexed only when `/settle` confirms the payer's transfer onchain; declarations attached to payments that never land are never listed. Entries are keyed on `(resource, toolName)` so MCP endpoints get one entry per tool. The first merchant to index a key owns it: settlements by other merchants for the same key are reported as `rejected` (`resource claimed by another merchant`) and change nothing. `accepts` holds the requirement from the most recent confirmed settlement, replaced rather than accumulated, so the catalog never advertises superseded terms.
+A resource is indexed only when `/settle` confirms the payer's transfer onchain; declarations attached to payments that never land are never listed. Entries are keyed on `(resource, toolName)` so MCP endpoints get one entry per tool. The first merchant to index a key owns it: settlements by other merchants for the same key are reported as `rejected` (`resource claimed by another merchant`) and change nothing. There is no in-protocol release, so a URL claimed by the wrong merchant needs an operator: disable that merchant first (`pnpm merchants disable <address>`, effective within a minute), then `pnpm discovery delete <url> [toolName]`. Deleting alone lets them reclaim it on their next settlement. `pnpm discovery list` shows entries and their owners. `accepts` holds the requirement from the most recent confirmed settlement, replaced rather than accumulated, so the catalog never advertises superseded terms.
 
 The catalog records that a declaration accompanied a confirmed payment. It does not verify that the declaring party controls the URL; see `../docs/BAZAAR_DISCOVERY.md`.
 

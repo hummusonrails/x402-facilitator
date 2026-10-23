@@ -16,7 +16,8 @@
     "migrate": "tsx scripts/apply-migration.ts",
     "clean": "rm -rf dist",
     "generate-api-key": "tsx scripts/generate-api-key.ts",
-    "merchants": "tsx scripts/manage-merchants.ts"
+    "merchants": "tsx scripts/manage-merchants.ts",
+    "discovery": "tsx scripts/manage-discovery.ts"
   },
   "dependencies": {
     "@x402/core": "^2.27.0",

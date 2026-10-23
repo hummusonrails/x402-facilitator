@@ -215,6 +215,22 @@ Two rules limit the damage:
   Later settlements by any other merchant for the same key are ignored and reported back as
   `rejected` / `resource claimed by another merchant`, so one cheap payment cannot rewrite another merchant's price,
   `payTo` or metadata.
+
+  The flip side: **first-writer-wins has no in-protocol release.** Any merchant can claim another seller's URL with one
+  small payment to themselves, and the real owner then gets `resource claimed by another merchant` indefinitely.
+  Releasing it takes an operator, and deleting the row alone is not enough, because the claimant reclaims it on their
+  next settlement. Disable the claimant first, then delete:
+
+  ```bash
+  pnpm merchants disable <address>                 # the owner shown by `pnpm discovery list`
+  # wait a minute: running facilitators cache merchants for 60s
+  pnpm discovery delete <url> [toolName]           # without toolName, every entry for the URL
+  ```
+
+  The wait matters. Running facilitators cache the merchant list for 60 seconds (`CACHE_TTL` in `src/auth.ts`), so a
+  disable takes up to a minute to bite, and until it does the claimant can still settle and reclaim the entry. Hence
+  the order: disable, wait a minute, delete. `pnpm discovery delete` prints how many entries it removed and who owned
+  them.
 - **`accepts` is replaced, not accumulated.** Each settlement carries the single requirement the buyer chose, and the
   newest one wins, so the row always advertises the terms the resource most recently settled on. Accumulating would
   leave superseded prices discoverable, and an agent reading a stale entry would sign an authorization the resource
@@ -256,3 +272,4 @@ The remedy (separate queues per trust level, or a per-caller budget) is an open 
 | Post-confirmation hook | `facilitator/src/settle.ts` (`SettleHooks.onIncomingConfirmed`) |
 | Routes: `/supported`, `/verify`, `/settle`, `/discovery/resources` | `facilitator/src/server.ts` |
 | Carrying `resource` and `extensions` through parsing | `facilitator/src/x402.ts`, `facilitator/src/types.ts` |
+| Operator tool: list and delete catalog entries | `facilitator/scripts/manage-discovery.ts` (`pnpm discovery`) |
