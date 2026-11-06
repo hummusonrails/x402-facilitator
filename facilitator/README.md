@@ -85,20 +85,21 @@ Query parameters, all optional: `type` (`http` | `mcp`), `payTo`, `scheme`, `net
 }
 ```
 
-A resource is indexed only when `/settle` confirms the payer's transfer onchain; declarations attached to payments that never land are never listed. Entries are keyed on `(resource, toolName)` so MCP endpoints get one entry per tool. The first merchant to index a key owns it: settlements by other merchants for the same key are reported as `rejected` (`resource claimed by another merchant`) and change nothing. There is no in-protocol release, so a URL claimed by the wrong merchant needs an operator: disable that merchant first (`pnpm merchants disable <address>`, effective within a minute), then `pnpm discovery delete <url> [toolName]`. Deleting alone lets them reclaim it on their next settlement. `pnpm discovery list` shows entries and their owners. `accepts` holds the requirement from the most recent confirmed settlement, replaced rather than accumulated, so the catalog never advertises superseded terms.
+A resource is indexed only when `/settle` confirms the payer's transfer onchain; declarations attached to payments that never land are never listed. Entries are keyed on `(resource, toolName)` so MCP endpoints get one entry per tool. It is also indexed only on an origin an operator has registered to the merchant whose API key settled the payment, one merchant per origin; anything else is reported as `rejected` (`resource origin not registered for this merchant`), and `GET /discovery/resources` serves only entries on an origin registered to their owner, so entries written before migration 007 are kept but not served. Register origins with `pnpm discovery origins add <merchant> <origin>`, hand one over with `origins move <origin> <merchant>`, and withdraw it with `origins remove <origin>`. Catalog entries follow the registration: registering an origin removes other merchants' entries on it, moving it removes the previous holder's, and removing it (or deleting the merchant) removes all of them; each command prints how many. `pnpm discovery list` shows entries and their owners, and `pnpm discovery delete <url> [toolName]` removes individual ones. `accepts` holds the requirement from the most recent confirmed settlement, replaced rather than accumulated, so the catalog never advertises superseded terms.
 
-The catalog records that a declaration accompanied a confirmed payment. It does not verify that the declaring party controls the URL; see `../docs/BAZAAR_DISCOVERY.md`.
+The catalog records that a declaration accompanied a confirmed payment to the merchant registered for its origin. The registration is the operator's statement; the facilitator does not prove domain ownership itself. See `../docs/BAZAAR_DISCOVERY.md`.
 
-**This endpoint needs migration 006.** `migrations/` is mounted into `docker-entrypoint-initdb.d`, which Postgres runs only when it initializes an empty data directory, so an existing database will not pick it up on deploy. Apply it once:
+**This endpoint needs migrations 006 and 007.** `migrations/` is mounted into `docker-entrypoint-initdb.d`, which Postgres runs only when it initializes an empty data directory, so an existing database will not pick them up on deploy. Apply them once:
 
 ```bash
 pnpm migrate migrations/006_discovery_resources.sql
+pnpm migrate migrations/007_discovery_origins.sql
 ```
 
-The migration is idempotent, so re-running it is harmless. Until it is applied, `/settle` still settles payments normally (indexing failures never fail a payment) and `GET /discovery/resources` returns 503.
+The migrations are idempotent, so re-running them is harmless, and 007 deletes no existing entries. Until they are applied, `/settle` still settles payments normally (indexing failures never fail a payment, and are reported as `processing`), and without both `GET /discovery/resources` returns 503.
 
 #### `EXTENSION-RESPONSES` header
-When a request carries a `bazaar` declaration, `/verify` and `/settle` add the facilitator-to-server sidechannel header defined in spec section 7.2.1: base64 JSON keyed by extension name. For `bazaar` it holds `status` (`success` once indexed, `processing` while the payment is unconfirmed or indexing is deferred, `rejected` when the declaration was dropped or the key belongs to another merchant) and `rejectedReason` on rejection. A rejected declaration never fails the payment. The header is absent when no declaration was sent.
+When a request carries a `bazaar` declaration, `/verify` and `/settle` add the facilitator-to-server sidechannel header defined in spec section 7.2.1: base64 JSON keyed by extension name. For `bazaar` it holds `status` (`success` once indexed, `processing` while the payment is unconfirmed or indexing is deferred, `rejected` when the declaration was dropped, its origin is not registered to the settling merchant, or the key belongs to another merchant) and `rejectedReason` on rejection. A rejected declaration never fails the payment. The header is absent when no declaration was sent.
 
 On `/settle` the verdict is tied to the payment. Validation starts alongside the settlement rather than before it, so the payment never waits on the validator, and the verdict is read once the payer's transfer confirms, waiting at most `DISCOVERY_SCHEMA_TIMEOUT_MS`. If it is in by then (the normal case) it is reported as is; if not, the status is `processing`. When the payment fails `/settle` sends no `bazaar` status, even for a malformed declaration, and while it is pending (`settlement_pending`) the status is `processing`.
 
@@ -115,6 +116,8 @@ The declaration reaching `/verify` and `/settle` is attacker-controlled on both 
 
 #### Known limitations
 - **A deferred declaration is never indexed.** If the schema validator is saturated or times out, the header says `processing`, the payment still settles, and the declaration is dropped: nothing persists it and nothing retries it. It is only catalogued if a later settlement carries it again.
+- **Routes within a registered origin are still the buyer's to choose.** Registration pins the origin, not the path, so a buyer paying a merchant can catalogue a made-up route on that merchant's own origin. The damage stays in that merchant's namespace, and `pnpm discovery delete` removes it.
+- **One origin cannot front several merchants.** A marketplace serving many merchants behind one origin can't be represented, since the path isn't part of an origin. That is deliberate: loosening one-merchant-per-origin later is easy, tightening it is not.
 - **`/verify` and `/settle` share one schema validation queue.** `/verify` is unauthenticated and does not consume the nonce, so a replayed payload with a slow schema can fill the queue and push declarations on real settlements onto the deferred path above. Honest `/verify` calls meanwhile wait out their deadline and report `processing`; a saturated validator adds at most `DISCOVERY_SCHEMA_TIMEOUT_MS` to `/verify` and to the settle hook.
 
 Details in [`../docs/BAZAAR_DISCOVERY.md`](../docs/BAZAAR_DISCOVERY.md#known-limitations).
@@ -326,7 +329,8 @@ PORT=3002
 # Optional: Max settlement amount in smallest unit (default: 1000 USDC)
 MAX_SETTLEMENT_AMOUNT=1000000000
 
-# Optional: Bazaar discovery. Off unless set to true; needs DATABASE_URL and migration 006
+# Optional: Bazaar discovery. Off unless set to true; needs DATABASE_URL, migrations 006 and 007,
+# and each selling merchant's origins registered with `pnpm discovery origins add`
 DISCOVERY_ENABLED=false
 # Bazaar discovery hardening (only used when discovery is enabled)
 # Hard timeout for the worker that validates a declaration's JSON Schema, and the longest
@@ -403,7 +407,7 @@ facilitator/
 │   ├── bazaar.ts        # Bazaar extension: declaration validation, indexing, EXTENSION-RESPONSES
 │   ├── schemaGuard.ts   # Runs declaration JSON Schema validation in a worker under a timeout
 │   ├── resourceUrl.ts   # SSRF screening for declared resource URLs
-│   ├── discoveryStore.ts # discovery_resources table access for GET /discovery/resources
+│   ├── discoveryStore.ts # discovery_resources table access and origin registration lookups
 │   ├── recovery.ts      # Retries incomplete merchant forwards
 │   ├── logging.ts       # Structured logging utilities
 │   └── health.ts        # Health check handler

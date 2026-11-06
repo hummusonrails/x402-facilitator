@@ -18,6 +18,8 @@ export interface DiscoveryMetadata {
 
 export interface DiscoveryUpsert {
   resourceUrl: string;
+  /** `new URL(resourceUrl).origin`: the same value the registration check matched */
+  origin: string;
   type: DiscoveryResourceType;
   toolName?: string;
   x402Version: number;
@@ -55,6 +57,29 @@ export interface DiscoveryQuery {
 }
 
 /**
+ * Whether `origin` is registered to `merchantAddress` (migration 007). Discovery indexes
+ * only resources on an origin registered to the merchant whose API key settled the payment.
+ * Throws when the registrations table is missing, so the caller reports `processing`
+ * rather than a rejection the seller could do nothing about.
+ */
+export async function isOriginRegistered(origin: string, merchantAddress: string): Promise<boolean> {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM discovery_merchant_origins
+       WHERE origin = $1 AND LOWER(merchant_address) = LOWER($2)`,
+      [origin, merchantAddress]
+    );
+    return rows.length > 0;
+  } catch (error: any) {
+    // 42P01 = undefined_table: migration 007 has not been applied to this database
+    if (error.code === '42P01') {
+      logger.error('Discovery origin registrations missing; apply migrations/007_discovery_origins.sql');
+    }
+    throw error;
+  }
+}
+
+/**
  * Insert or refresh a catalog entry. Keyed on (resource_url, tool_name) so an MCP
  * endpoint that serves several tools gets one row per tool, as the spec requires.
  *
@@ -75,9 +100,10 @@ export async function upsertDiscoveryResource(args: DiscoveryUpsert): Promise<Up
   const requirementJson = JSON.stringify([args.requirement]);
   const { rows } = await pool.query(
     `INSERT INTO discovery_resources
-       (resource_url, resource_type, tool_name, x402_version, accepts, metadata, merchant_address, last_nonce)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, decode(substr($7, 3), 'hex'), $8)
+       (resource_url, resource_type, tool_name, x402_version, accepts, metadata, merchant_address, last_nonce, origin)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, decode(substr($7, 3), 'hex'), $8, $9)
      ON CONFLICT (resource_url, tool_name) DO UPDATE SET
+       origin = EXCLUDED.origin,
        x402_version = EXCLUDED.x402_version,
        accepts = EXCLUDED.accepts,
        metadata = EXCLUDED.metadata,
@@ -95,6 +121,7 @@ export async function upsertDiscoveryResource(args: DiscoveryUpsert): Promise<Up
       JSON.stringify(args.metadata),
       args.merchantAddress,
       args.nonce,
+      args.origin,
     ]
   );
 
@@ -143,7 +170,15 @@ function toItem(row: any): DiscoveryItem {
  * Returns the total matching count for `pagination.total`.
  */
 export async function listDiscoveryResources(query: DiscoveryQuery): Promise<{ items: DiscoveryItem[]; total: number }> {
-  const where: string[] = [];
+  // Serve only rows whose origin is registered to the merchant that owns them. Indexing
+  // already enforces this for new rows; this covers rows written before migration 007,
+  // which it left in place rather than delete. A NULL origin never matches, so rows the
+  // backfill could not normalize are not served either.
+  const where: string[] = [
+    `EXISTS (SELECT 1 FROM discovery_merchant_origins o
+             WHERE o.origin = discovery_resources.origin
+               AND discovery_resources.merchant_address = decode(regexp_replace(lower(o.merchant_address), '^0x', ''), 'hex'))`,
+  ];
   const values: any[] = [];
 
   if (query.type) {
@@ -163,7 +198,7 @@ export async function listDiscoveryResources(query: DiscoveryQuery): Promise<{ i
     where.push(`EXISTS (SELECT 1 FROM jsonb_array_elements(accepts) a WHERE lower(a->>'payTo') = $${values.length})`);
   }
 
-  const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+  const whereSql = `WHERE ${where.join(' AND ')}`;
   const filterValues = [...values];
   values.push(query.limit, query.offset);
 

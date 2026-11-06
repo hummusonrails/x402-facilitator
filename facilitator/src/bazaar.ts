@@ -7,7 +7,7 @@ import {
 import type { Address } from 'viem';
 import type { Response } from 'express';
 import type { NormalizedPayment } from './types.js';
-import { upsertDiscoveryResource, type DiscoveryMetadata, type UpsertOutcome } from './discoveryStore.js';
+import { isOriginRegistered, upsertDiscoveryResource, type DiscoveryMetadata, type UpsertOutcome } from './discoveryStore.js';
 import { validateDeclarationSchema } from './schemaGuard.js';
 import { screenResourceUrl } from './resourceUrl.js';
 import { DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS, DISCOVERY_MAX_DECLARATION_BYTES } from './config.js';
@@ -182,20 +182,49 @@ export async function evaluateBazaarDeclaration(payment: NormalizedPayment, logg
 }
 
 export const REJECTED_CLAIMED_BY_OTHER = 'resource claimed by another merchant';
+export const REJECTED_ORIGIN_NOT_REGISTERED = 'resource origin not registered for this merchant';
+
+export type IndexOutcome = UpsertOutcome | 'origin_not_registered';
+
+/** The canonical URL's origin as URL.origin gives it, or null if it does not parse. */
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Write an accepted declaration to the catalog. Only call this once the payer's
  * transfer has confirmed, so unpaid declarations never become discoverable.
- * Returns `claimed_by_other` when the (resource, toolName) key already belongs to a
- * different merchant; the caller reports that as a rejection.
+ * Returns `origin_not_registered` when the catalogued URL's origin is not registered to
+ * this merchant, and `claimed_by_other` when the (resource, toolName) key already belongs
+ * to a different merchant; the caller reports both as a rejection.
  */
 export async function indexBazaarResource(
   resource: DiscoveredResource,
   payment: NormalizedPayment,
   merchantAddress: Address,
   logger: Logger
-): Promise<UpsertOutcome> {
+): Promise<IndexOutcome> {
   const type = resource.discoveryInfo.input.type;
+
+  // The buyer chooses resource.url and routeTemplate, so the URL alone proves nothing.
+  // Index only on an origin an operator registered to the merchant that settled. The
+  // origin is computed once, from the canonical URL that is stored, and the same value is
+  // both checked and written, so the check and the tooling never parse different strings.
+  // A URL that does not parse fails closed.
+  const origin = originOf(resource.resourceUrl);
+  if (origin === null || !(await isOriginRegistered(origin, merchantAddress))) {
+    logger.warn('Bazaar resource not catalogued', {
+      resource: resource.resourceUrl,
+      origin,
+      merchant: merchantAddress,
+      reason: REJECTED_ORIGIN_NOT_REGISTERED,
+    });
+    return 'origin_not_registered';
+  }
 
   // The SDK sanitizes serviceName, tags and iconUrl but passes description and mimeType
   // through untouched, and every field here is republished on a public endpoint, so bound
@@ -218,6 +247,7 @@ export async function indexBazaarResource(
 
   const outcome = await upsertDiscoveryResource({
     resourceUrl: resource.resourceUrl,
+    origin,
     type,
     toolName: 'toolName' in resource ? resource.toolName : undefined,
     x402Version: resource.x402Version,

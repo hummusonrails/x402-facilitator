@@ -125,6 +125,17 @@ describe('POST /settle with a bazaar declaration', () => {
     expect(indexBazaarResource).not.toHaveBeenCalled();
   });
 
+  it('reports a valid declaration on an unregistered origin as rejected', async () => {
+    evaluateBazaarDeclaration.mockResolvedValue(VALID);
+    indexBazaarResource.mockResolvedValue('origin_not_registered');
+    settlePayment.mockImplementation(confirmingSettle);
+
+    const { status, header, body } = await settle(facilitatorRequest(validBazaarDeclaration()));
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ success: true });
+    expect(header).toEqual({ bazaar: { status: 'rejected', rejectedReason: 'resource origin not registered for this merchant' } });
+  });
+
   it('stops waiting at the deadline, reports processing and indexes nothing', async () => {
     evaluateBazaarDeclaration.mockReturnValue(new Promise(() => {}));
     settlePayment.mockImplementation(confirmingSettle);

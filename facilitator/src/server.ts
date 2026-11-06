@@ -27,6 +27,7 @@ import { executeRefund } from './refund.js';
 import {
   BAZAAR_KEY,
   REJECTED_CLAIMED_BY_OTHER,
+  REJECTED_ORIGIN_NOT_REGISTERED,
   evaluateBazaarDeclaration,
   hasBazaarDeclaration,
   indexBazaarResource,
@@ -370,7 +371,9 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
           const outcome = await indexBazaarResource(bazaar.resource, parsed.payment, merchantAddress, nonceLogger);
           bazaarResponse = outcome === 'claimed_by_other'
             ? { status: 'rejected', rejectedReason: REJECTED_CLAIMED_BY_OTHER }
-            : { status: 'success' };
+            : outcome === 'origin_not_registered'
+              ? { status: 'rejected', rejectedReason: REJECTED_ORIGIN_NOT_REGISTERED }
+              : { status: 'success' };
         } catch (error: any) {
           nonceLogger.error('Bazaar indexing failed', { error: error.message });
           bazaarResponse = { status: 'processing' };
@@ -456,9 +459,9 @@ app.get('/discovery/resources', async (req: Request, res: Response, next: NextFu
       pagination: { limit, offset, total },
     });
   } catch (error: any) {
-    // 42P01 = undefined_table: migration 006 has not been applied to this database
+    // 42P01 = undefined_table: migration 006 or 007 has not been applied to this database
     if (error.code === '42P01') {
-      logger.error('Discovery table missing; apply migrations/006_discovery_resources.sql');
+      logger.error('Discovery tables missing; apply migrations/006_discovery_resources.sql and 007_discovery_origins.sql');
       return res.status(503).json({
         error: 'Discovery unavailable',
         message: 'Discovery index is not initialized',

@@ -12,9 +12,12 @@ the extension existed: `/supported` advertises no extensions, `/verify` and `/se
 
 To turn it on:
 
-1. Apply migration 006 to an existing database (a fresh Docker database picks it up on init):
-   `pnpm migrate migrations/006_discovery_resources.sql`
-2. Set `DISCOVERY_ENABLED=true` alongside `DATABASE_URL` and restart.
+1. Apply migrations 006 and 007 to an existing database (a fresh Docker database picks them up on init):
+   `pnpm migrate migrations/006_discovery_resources.sql` and `pnpm migrate migrations/007_discovery_origins.sql`
+2. Register the origin each selling merchant serves its resources from:
+   `pnpm discovery origins add <merchant> <origin>`, for example `https://api.example.com`. Nothing is catalogued
+   for a merchant with no registered origin.
+3. Set `DISCOVERY_ENABLED=true` alongside `DATABASE_URL` and restart.
 
 Enabled without a database, the facilitator still validates declarations but has nowhere to index them, so it does
 not advertise `bazaar` and reports valid declarations as `rejected` (`discovery index unavailable`).
@@ -119,7 +122,7 @@ sequenceDiagram
   Fac->>Chain: transferWithAuthorization(buyer → facilitator)
   Chain-->>Fac: receipt + Transfer event
   Fac->>DB: status = incoming_complete
-  Note over Fac: onIncomingConfirmed hook → verdict<br/>(waits ≤ DISCOVERY_SCHEMA_TIMEOUT_MS) → indexBazaarResource()
+  Note over Fac: onIncomingConfirmed hook → verdict<br/>(waits ≤ DISCOVERY_SCHEMA_TIMEOUT_MS) → indexBazaarResource()<br/>origin registered to this merchant?
   Fac->>DB: UPSERT discovery_resources (resource_url, tool_name)
   Fac->>Chain: transfer(merchant share)
   Fac-->>Seller: 200 success, tx hashes + EXTENSION-RESPONSES {bazaar: success}
@@ -208,35 +211,41 @@ not every other extension they happened to attach.
 ## What the catalog does and does not attest
 
 A catalog row records that **a declaration accompanied a payment that confirmed onchain to the facilitator, settled
-under the API key of the merchant stored in `merchant_address`.** That is all it records.
+under the API key of the merchant that an operator registered for the resource's origin.** That is all it records.
 
-It does **not** attest that the declaring party controls the resource URL. The declaration and `resource.url` arrive
-in the buyer's `PaymentPayload`, which the buyer signs and can edit. A buyer can settle a genuine payment to a genuine
-merchant while declaring any URL and any metadata; the facilitator has no way to prove domain ownership and does not
-try to. Consumers should treat entries as leads that cost someone real USDC to place, not as verified listings.
+The declaration and `resource.url` arrive in the buyer's `PaymentPayload`, which the buyer signs and can edit, and
+the catalogued URL is built from them: origin + the declaration's `routeTemplate`. On its own that URL proves nothing;
+a buyer could point it at anyone's domain. So the facilitator does not take the URL's word for it. It indexes a
+resource only when the URL's origin is registered to the merchant whose API key settled the payment
+(`discovery_merchant_origins`, migration 007). The registration is the operator's statement that this merchant serves
+that origin. The facilitator still does not prove domain ownership itself.
 
-Two rules limit the damage:
+Three rules hold the catalog together:
 
-- **First writer owns the key.** The merchant whose payment first indexed a `(resource, toolName)` pair owns the row.
-  Later settlements by any other merchant for the same key are ignored and reported back as
-  `rejected` / `resource claimed by another merchant`, so one cheap payment cannot rewrite another merchant's price,
-  `payTo` or metadata.
+- **One merchant per origin, registered by the operator.** `pnpm discovery origins add <merchant> <origin>` registers
+  an origin; it is refused, naming the current holder, if another merchant already holds it. A settlement whose
+  catalogued URL is on an origin not registered to the settling merchant is reported as
+  `rejected` / `resource origin not registered for this merchant` and indexes nothing. The check uses the canonical
+  URL, so a lookalike `resource.url` does not get around it, and a URL that does not parse fails closed. A merchant
+  with no registered origin gets nothing indexed. `/verify` is unauthenticated and so has no merchant to check
+  against: there a valid declaration is reported `processing`, and only `/settle` can reject it on these grounds.
+  Reads follow the same rule: `GET /discovery/resources` serves only entries on an origin registered to their owner.
+  Entries written before migration 007 are kept, not deleted, but are not served until their origin is registered
+  to their owner, and an entry whose origin the backfill could not normalize is never served.
+- **Catalog entries follow their origin's registration.** A trigger on `discovery_merchant_origins` keeps them in
+  line, whichever tool changes the registration:
+  - **Registering** an origin (`origins add`) removes any entries on it held by other merchants.
+  - **Moving** it to another merchant (`pnpm discovery origins move <origin> <merchant>`) removes the previous
+    holder's entries; the new holder's resources are catalogued again on its next settlement.
+  - **Removing** it (`pnpm discovery origins remove <origin>`), or deleting the merchant (`pnpm merchants delete`,
+    which cascades to its registrations), removes every entry on it.
 
-  The flip side: **first-writer-wins has no in-protocol release.** Any merchant can claim another seller's URL with one
-  small payment to themselves, and the real owner then gets `resource claimed by another merchant` indefinitely.
-  Releasing it takes an operator, and deleting the row alone is not enough, because the claimant reclaims it on their
-  next settlement. Disable the claimant first, then delete:
-
-  ```bash
-  pnpm merchants disable <address>                 # the owner shown by `pnpm discovery list`
-  # wait a minute: running facilitators cache merchants for 60s
-  pnpm discovery delete <url> [toolName]           # without toolName, every entry for the URL
-  ```
-
-  The wait matters. Running facilitators cache the merchant list for 60 seconds (`CACHE_TTL` in `src/auth.ts`), so a
-  disable takes up to a minute to bite, and until it does the claimant can still settle and reclaim the entry. Hence
-  the order: disable, wait a minute, delete. `pnpm discovery delete` prints how many entries it removed and who owned
-  them.
+  Each `pnpm discovery origins` command prints how many entries it removed. `pnpm discovery delete <url> [toolName]`
+  removes individual entries; the owner can index them again on its next settlement while it holds the origin.
+- **First writer owns the key.** Within an origin, the merchant whose payment first indexed a `(resource, toolName)`
+  pair owns the row, and settlements by any other merchant for the same key are reported as
+  `rejected` / `resource claimed by another merchant`. With one merchant per origin this only arises around a move,
+  and the move's cleanup clears it.
 - **`accepts` is replaced, not accumulated.** Each settlement carries the single requirement the buyer chose, and the
   newest one wins, so the row always advertises the terms the resource most recently settled on. Accumulating would
   leave superseded prices discoverable, and an agent reading a stale entry would sign an authorization the resource
@@ -270,6 +279,17 @@ facilitator does not hit this path; a third-party declaration under load can.
 most `DISCOVERY_SCHEMA_TIMEOUT_MS` per call. The rate limiter is the only thing bounding the queue today.
 The remedy (separate queues per trust level, or a per-caller budget) is an open design decision.
 
+Two consequences of the origin model are deliberate:
+
+**Routes within a registered origin are still the buyer's to choose.** Registration pins the origin, not the path:
+a buyer paying a merchant can still catalogue a made-up route on that merchant's own registered origin. The damage
+stays inside that merchant's namespace, under its own name, and `pnpm discovery delete` removes the entry.
+
+**One origin cannot front several merchants.** A marketplace serving many merchants behind a single origin cannot be
+represented, since the path is not part of an origin and each origin belongs to exactly one merchant. That is a
+trade, not an oversight: loosening a one-merchant-per-origin rule later is a trivial migration, tightening it after
+data has violated it is not.
+
 ## Files
 
 | Concern | File |
@@ -278,8 +298,8 @@ The remedy (separate queues per trust level, or a per-caller budget) is an open 
 | Worker-isolated, timed-out JSON Schema validation | `facilitator/src/schemaGuard.ts` |
 | Resource URL screening (SSRF) | `facilitator/src/resourceUrl.ts` |
 | Catalog table access | `facilitator/src/discoveryStore.ts` |
-| Table definition | `facilitator/migrations/006_discovery_resources.sql` |
+| Table definitions | `facilitator/migrations/006_discovery_resources.sql`, `facilitator/migrations/007_discovery_origins.sql` (origin registrations and the cascade trigger) |
 | Post-confirmation hook | `facilitator/src/settle.ts` (`SettleHooks.onIncomingConfirmed`) |
-| Operator tool: list and delete catalog entries | `facilitator/scripts/manage-discovery.ts` (`pnpm discovery`) |
+| Operator tool: catalog entries and origin registrations | `facilitator/scripts/manage-discovery.ts` (`pnpm discovery`) |
 | Routes: `/supported`, `/verify`, `/settle`, `/discovery/resources` | `facilitator/src/server.ts` |
 | Carrying `resource` and `extensions` through parsing | `facilitator/src/x402.ts`, `facilitator/src/types.ts` |

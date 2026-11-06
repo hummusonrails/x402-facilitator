@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -11,16 +11,49 @@ import { fileURLToPath } from 'node:url';
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeDb = TEST_DATABASE_URL ? describe : describe.skip;
 
-describeDb('upsertDiscoveryResource ownership', () => {
-  // discoveryStore imports the pool at module load, so the URL has to be set first
-  process.env.DATABASE_URL = TEST_DATABASE_URL;
-  const storeModule = import('../src/discoveryStore.js');
-  const dbModule = import('../src/db.js');
+function migration(name: string): string {
+  return readFileSync(fileURLToPath(new URL(`../migrations/${name}`, import.meta.url)), 'utf8');
+}
 
-  const MERCHANT_A = '0xa4d50e386Fa77d3EE3D4F7e8246dE21F4828eeF4' as const;
+// discoveryStore imports the pool at module load, so the URL has to be set first
+if (TEST_DATABASE_URL) process.env.DATABASE_URL = TEST_DATABASE_URL;
+const storeModule = TEST_DATABASE_URL ? import('../src/discoveryStore.js') : (null as never);
+const dbModule = TEST_DATABASE_URL ? import('../src/db.js') : (null as never);
+
+const MERCHANT_A = '0xa4d50e386Fa77d3EE3D4F7e8246dE21F4828eeF4' as const;
+const MERCHANT_B = '0xe7D03950f92DbD90Ce626286DCCc8768dEE09ad1' as const;
+const ORIGIN = 'https://api.example.com';
+
+if (TEST_DATABASE_URL) {
+  beforeAll(async () => {
+    const { pool } = await dbModule;
+    // 007 references merchants(address); 002 is not idempotent, so apply it only once
+    const { rows } = await pool.query(`SELECT to_regclass('merchants') IS NOT NULL AS present`);
+    if (!rows[0].present) await pool.query(migration('002_merchants.sql'));
+  });
+
+  beforeEach(async () => {
+    const { pool } = await dbModule;
+    await pool.query(migration('006_discovery_resources.sql'));
+    await pool.query(migration('007_discovery_origins.sql'));
+    // TRUNCATE fires no row triggers, so this resets state without exercising the cascade
+    await pool.query('TRUNCATE discovery_resources, discovery_merchant_origins');
+    await pool.query('DELETE FROM merchants WHERE address = ANY($1)', [[MERCHANT_A, MERCHANT_B]]);
+    await pool.query(
+      `INSERT INTO merchants (address, name, api_key_hash) VALUES ($1, 'A', 'x'), ($2, 'B', 'x')`,
+      [MERCHANT_A, MERCHANT_B]
+    );
+  });
+
+  afterAll(async () => {
+    const { closePool } = await dbModule;
+    await closePool();
+  });
+}
+
+describeDb('upsertDiscoveryResource ownership', () => {
   // Same address as A, different casing: equality rests on decode(substr($7, 3), 'hex')
   const MERCHANT_A_LOWER = MERCHANT_A.toLowerCase() as `0x${string}`;
-  const MERCHANT_B = '0xe7D03950f92DbD90Ce626286DCCc8768dEE09ad1' as const;
 
   const RESOURCE = 'https://api.example.com/analyze';
 
@@ -31,6 +64,7 @@ describeDb('upsertDiscoveryResource ownership', () => {
   function upsertArgs(merchantAddress: `0x${string}`, amount: string, payTo: string, nonce: string) {
     return {
       resourceUrl: RESOURCE,
+      origin: ORIGIN,
       type: 'http' as const,
       toolName: undefined,
       x402Version: 2,
@@ -50,21 +84,6 @@ describeDb('upsertDiscoveryResource ownership', () => {
     );
     return rows[0];
   }
-
-  beforeEach(async () => {
-    const { pool } = await dbModule;
-    const schema = readFileSync(
-      fileURLToPath(new URL('../migrations/006_discovery_resources.sql', import.meta.url)),
-      'utf8'
-    );
-    await pool.query(schema);
-    await pool.query('TRUNCATE discovery_resources');
-  });
-
-  afterAll(async () => {
-    const { closePool } = await dbModule;
-    await closePool();
-  });
 
   it('inserts a new resource for the first merchant that settles it', async () => {
     const { upsertDiscoveryResource } = await storeModule;
@@ -117,6 +136,9 @@ describeDb('upsertDiscoveryResource ownership', () => {
 
   it('keys MCP entries per tool, so one endpoint can serve several tools', async () => {
     const { upsertDiscoveryResource, listDiscoveryResources } = await storeModule;
+    // The listing serves registered origins only
+    const { pool } = await dbModule;
+    await pool.query(`INSERT INTO discovery_merchant_origins (origin, merchant_address) VALUES ($1, $2)`, [ORIGIN, MERCHANT_A]);
     const mcp = (toolName: string, nonce: string) => ({
       ...upsertArgs(MERCHANT_A, '250000', MERCHANT_A, nonce),
       type: 'mcp' as const,
@@ -128,5 +150,150 @@ describeDb('upsertDiscoveryResource ownership', () => {
 
     const { total } = await listDiscoveryResources({ type: 'mcp', limit: 20, offset: 0 });
     expect(total).toBe(2);
+  });
+});
+
+describeDb('origin registration (migration 007)', () => {
+  async function query(sql: string, params: unknown[] = []) {
+    const { pool } = await dbModule;
+    return (await pool.query(sql, params)).rows;
+  }
+
+  /** A catalog row as indexing writes it: origin set from the canonical URL */
+  async function index(merchant: `0x${string}`, resourceUrl: string, origin: string | null = ORIGIN) {
+    const { upsertDiscoveryResource } = await storeModule;
+    if (origin === null) {
+      // A pre-007 row: written without an origin, as the old code did
+      await query(
+        `INSERT INTO discovery_resources (resource_url, resource_type, tool_name, x402_version, accepts, metadata, merchant_address, last_nonce)
+         VALUES ($1, 'http', '', 2, '[]', '{}', decode(substr($2, 3), 'hex'), 'n')`,
+        [resourceUrl, merchant]
+      );
+      return;
+    }
+    return upsertDiscoveryResource({
+      resourceUrl,
+      origin,
+      type: 'http',
+      x402Version: 2,
+      requirement: { scheme: 'exact' },
+      metadata: {},
+      merchantAddress: merchant,
+      nonce: '0x01',
+    });
+  }
+
+  async function register(merchant: string, origin = ORIGIN) {
+    await query(`INSERT INTO discovery_merchant_origins (origin, merchant_address) VALUES ($1, $2)`, [origin, merchant]);
+  }
+
+  async function count(origin = ORIGIN): Promise<number> {
+    return (await query(`SELECT count(*)::int AS n FROM discovery_resources WHERE origin = $1`, [origin]))[0].n;
+  }
+
+  it('answers whether an origin is registered to a merchant, ignoring address case', async () => {
+    const { isOriginRegistered } = await storeModule;
+    await register(MERCHANT_A);
+
+    expect(await isOriginRegistered(ORIGIN, MERCHANT_A)).toBe(true);
+    expect(await isOriginRegistered(ORIGIN, MERCHANT_A.toLowerCase())).toBe(true);
+    expect(await isOriginRegistered(ORIGIN, MERCHANT_B)).toBe(false);
+    expect(await isOriginRegistered('https://other.example.com', MERCHANT_A)).toBe(false);
+  });
+
+  it('refuses a second merchant on the same origin', async () => {
+    await register(MERCHANT_A);
+    await expect(register(MERCHANT_B)).rejects.toMatchObject({ code: '23505' });
+  });
+
+  it('writes the origin it was given on insert and on update', async () => {
+    await register(MERCHANT_A);
+    expect(await index(MERCHANT_A, 'https://API.Example.com:443/x')).toBe('inserted');
+    expect(await index(MERCHANT_A, 'https://API.Example.com:443/x')).toBe('updated');
+    expect(await count()).toBe(1);
+  });
+
+  it('backfills pre-007 rows the way URL.origin normalizes, and deletes nothing doing it', async () => {
+    await index(MERCHANT_A, 'https://API.Example.com:443/x', null);
+    await index(MERCHANT_A, 'HTTP://shop.example.com:80/y', null);
+    await index(MERCHANT_A, 'https://api.example.com:8443/z', null);
+    await index(MERCHANT_A, 'https://bücher.example/w', null);
+
+    await query(migration('007_discovery_origins.sql'));
+
+    const rows = await query(`SELECT resource_url, origin FROM discovery_resources ORDER BY id`);
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      // Non-ASCII hosts are left NULL for the script, since URL.origin punycodes them
+      const expected = /^[\x00-\x7f]*$/.test(row.resource_url) ? new URL(row.resource_url).origin : null;
+      expect(row.origin).toBe(expected);
+    }
+  });
+
+  it('removing a registration removes the entries on its origin', async () => {
+    await register(MERCHANT_A);
+    await index(MERCHANT_A, `${ORIGIN}/a`);
+    await index(MERCHANT_A, `${ORIGIN}/b`);
+
+    await query(`DELETE FROM discovery_merchant_origins WHERE origin = $1`, [ORIGIN]);
+    expect(await count()).toBe(0);
+  });
+
+  it('deleting the merchant removes its registrations and their entries, so the origin is clean for the next owner', async () => {
+    await register(MERCHANT_A);
+    await index(MERCHANT_A, `${ORIGIN}/a`);
+
+    await query(`DELETE FROM merchants WHERE address = $1`, [MERCHANT_A]);
+    expect(await query(`SELECT * FROM discovery_merchant_origins`)).toHaveLength(0);
+    expect(await count()).toBe(0);
+
+    await register(MERCHANT_B);
+    expect(await index(MERCHANT_B, `${ORIGIN}/a`)).toBe('inserted');
+  });
+
+  it('registering an origin removes other merchants\' entries on it and keeps the registrant\'s own', async () => {
+    await index(MERCHANT_B, `${ORIGIN}/squat`);
+    await index(MERCHANT_A, `${ORIGIN}/own`);
+
+    await register(MERCHANT_A);
+    const rows = await query(`SELECT resource_url FROM discovery_resources WHERE origin = $1`, [ORIGIN]);
+    expect(rows.map((row) => row.resource_url)).toEqual([`${ORIGIN}/own`]);
+  });
+
+  it('moving an origin removes the previous holder\'s entries, so the new holder is not blocked', async () => {
+    await register(MERCHANT_A);
+    await index(MERCHANT_A, `${ORIGIN}/a`);
+
+    await query(`UPDATE discovery_merchant_origins SET merchant_address = $2 WHERE origin = $1`, [ORIGIN, MERCHANT_B]);
+    expect(await count()).toBe(0);
+    expect(await index(MERCHANT_B, `${ORIGIN}/a`)).toBe('inserted');
+  });
+
+  it('serves only entries on an origin registered to their owner', async () => {
+    const { listDiscoveryResources } = await storeModule;
+    await register(MERCHANT_A);
+    await index(MERCHANT_A, `${ORIGIN}/served`);
+    // Left in place by the non-destructive migration, but none of these may be served:
+    await index(MERCHANT_B, `${ORIGIN}/other-owner`); // registered origin, different owner
+    await index(MERCHANT_A, 'https://unregistered.example.com/x', 'https://unregistered.example.com'); // origin nobody registered
+    await index(MERCHANT_A, `${ORIGIN}/null-origin`, null); // origin the backfill left NULL
+
+    const { items, total } = await listDiscoveryResources({ limit: 20, offset: 0 });
+    expect(total).toBe(1);
+    expect(items.map((item) => item.resource)).toEqual([`${ORIGIN}/served`]);
+
+    // Past the last page the total comes from the same filter
+    expect((await listDiscoveryResources({ limit: 20, offset: 5 })).total).toBe(1);
+  });
+
+  it('an update that is not a move deletes nothing', async () => {
+    await register(MERCHANT_A);
+    await index(MERCHANT_A, `${ORIGIN}/a`);
+    // A row the cascade would take if it fired: another merchant's, written straight to the store
+    await index(MERCHANT_B, `${ORIGIN}/b`);
+
+    await query(`UPDATE discovery_merchant_origins SET created_at = now() - interval '1 day'`);
+    await query(`UPDATE discovery_merchant_origins SET merchant_address = merchant_address`);
+    expect(await count()).toBe(2);
   });
 });
