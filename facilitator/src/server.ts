@@ -17,7 +17,7 @@ import { verifyPayment } from './verify.js';
 import { settlePayment } from './settle.js';
 import { generateRequirements } from './requirements.js';
 import { getHealth } from './health.js';
-import { createLogger, generateCorrelationId } from './logging.js';
+import { createLogger, generateCorrelationId, type Logger } from './logging.js';
 import { runStartupValidations } from './startup.js';
 import { startRecoveryWorker } from './recovery.js';
 import { isDatabaseConfigured } from './db.js';
@@ -35,7 +35,7 @@ import {
 } from './bazaar.js';
 import { listDiscoveryResources, type DiscoveryResourceType } from './discoveryStore.js';
 import * as Errors from './errors.js';
-import type { SupportedKind, SupportedResponse, RequirementsRequest, PaymentRequired } from './types.js';
+import type { SupportedKind, SupportedResponse, RequirementsRequest, PaymentRequired, NormalizedPayment } from './types.js';
 import type { BazaarEvaluation } from './bazaar.js';
 
 /**
@@ -57,6 +57,18 @@ function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | undefined
     timer = setTimeout(() => resolve(undefined), ms);
   });
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Start evaluating a declaration without awaiting it. The catch is attached as the promise
+ * is created, so a rejection cannot go unhandled before the caller awaits it; a crash in
+ * the evaluation is reported like a timeout (deferred, so `processing`), never as a rejection.
+ */
+function startBazaarEvaluation(payment: NormalizedPayment, logger: Logger): Promise<BazaarEvaluation> {
+  return evaluateBazaarDeclaration(payment, logger).catch((error: any): BazaarEvaluation => {
+    logger.error('Bazaar evaluation failed', { error: error.message });
+    return { declared: true, valid: false, deferred: true };
+  });
 }
 
 const app: Express = express();
@@ -276,9 +288,15 @@ app.post('/verify', async (req: Request, res: Response) => {
     // route is unauthenticated, so it happens only once the payment itself checks out.
     // An unsigned payload therefore buys no schema work at all. Discovery is read-only
     // here: a valid declaration is reported as processing until a settle confirms it.
-    if (DISCOVERY_ENABLED && response.isValid) {
-      const bazaar = await evaluateBazaarDeclaration(parsed.payment, nonceLogger);
-      if (bazaar.declared) {
+    // Resource servers wait on /verify too, so the verdict gets at most one validation
+    // budget; past that the answer is processing. The queued job still runs to completion:
+    // the deadline bounds this response, not the shared validator queue.
+    if (DISCOVERY_ENABLED && response.isValid && hasBazaarDeclaration(parsed.payment)) {
+      const bazaar = await withDeadline(startBazaarEvaluation(parsed.payment, nonceLogger), DISCOVERY_SCHEMA_TIMEOUT_MS);
+      if (!bazaar) {
+        nonceLogger.warn('Bazaar verdict not ready by the deadline on /verify');
+        setBazaarExtensionResponse(res, { status: 'processing' });
+      } else if (bazaar.declared) {
         setBazaarExtensionResponse(res, bazaarStatusFor(bazaar));
       }
     }
@@ -323,10 +341,7 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
     // created, so a rejection cannot go unhandled before the hook gets to await it.
     const evaluation: Promise<BazaarEvaluation> | undefined =
       DISCOVERY_ENABLED && hasBazaarDeclaration(parsed.payment)
-        ? evaluateBazaarDeclaration(parsed.payment, nonceLogger).catch((error: any): BazaarEvaluation => {
-            nonceLogger.error('Bazaar evaluation failed', { error: error.message });
-            return { declared: true, valid: false, deferred: true };
-          })
+        ? startBazaarEvaluation(parsed.payment, nonceLogger)
         : undefined;
 
     // With discovery off, or no declaration, no hooks are passed, so settlement runs exactly as it does without the extension

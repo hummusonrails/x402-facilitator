@@ -25,6 +25,14 @@ const verifyResult: { isValid: boolean; invalidReason?: string; payer: string } 
 vi.mock('../src/verify.js', () => ({
   verifyPayment: async () => ({ response: { ...verifyResult } }),
 }));
+// The real evaluator by default; individual tests replace it to control the verdict's timing
+const evaluateBazaarDeclaration = vi.fn();
+let realEvaluate: (...args: any[]) => Promise<unknown>;
+vi.mock('../src/bazaar.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/bazaar.js')>();
+  realEvaluate = original.evaluateBazaarDeclaration as any;
+  return { ...original, evaluateBazaarDeclaration: (...args: unknown[]) => evaluateBazaarDeclaration(...args) };
+});
 
 let server: Server;
 let base: string;
@@ -48,6 +56,8 @@ beforeEach(() => {
   database.configured = false;
   verifyResult.isValid = true;
   delete verifyResult.invalidReason;
+  evaluateBazaarDeclaration.mockReset();
+  evaluateBazaarDeclaration.mockImplementation((...args: any[]) => realEvaluate(...args));
 });
 
 async function verify(body: unknown) {
@@ -103,6 +113,38 @@ describe('POST /verify with a bazaar declaration', () => {
     const { status, header } = await verify(facilitatorRequest(undefined));
     expect(status).toBe(200);
     expect(header).toBeNull();
+    expect(evaluateBazaarDeclaration).not.toHaveBeenCalled();
+  });
+
+  it('reports the verdict when it arrives within the deadline', async () => {
+    evaluateBazaarDeclaration.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve({ declared: true, valid: false, rejectedReason: 'bad' }), 20))
+    );
+
+    const { status, header } = await verify(facilitatorRequest(validBazaarDeclaration()));
+    expect(status).toBe(200);
+    expect(header).toEqual({ bazaar: { status: 'rejected', rejectedReason: 'bad' } });
+  });
+
+  it('stops waiting at the deadline and reports processing, leaving the payment result alone', async () => {
+    evaluateBazaarDeclaration.mockReturnValue(new Promise(() => {}));
+
+    const started = Date.now();
+    const { status, header, body } = await verify(facilitatorRequest(validBazaarDeclaration()));
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ isValid: true, payer: PAYER });
+    expect(header).toEqual({ bazaar: { status: 'processing' } });
+    // DISCOVERY_SCHEMA_TIMEOUT_MS defaults to 250; a queue's worth would be seconds
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('reports processing, not a 500, when the evaluation itself fails', async () => {
+    evaluateBazaarDeclaration.mockRejectedValue(new Error('worker crashed'));
+
+    const { status, header, body } = await verify(facilitatorRequest(validBazaarDeclaration()));
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ isValid: true, payer: PAYER });
+    expect(header).toEqual({ bazaar: { status: 'processing' } });
   });
 });
 

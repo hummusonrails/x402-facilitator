@@ -102,7 +102,7 @@ When a request carries a `bazaar` declaration, `/verify` and `/settle` add the f
 
 On `/settle` the verdict is tied to the payment. Validation starts alongside the settlement rather than before it, so the payment never waits on the validator, and the verdict is read once the payer's transfer confirms, waiting at most `DISCOVERY_SCHEMA_TIMEOUT_MS`. If it is in by then (the normal case) it is reported as is; if not, the status is `processing`. When the payment fails `/settle` sends no `bazaar` status, even for a malformed declaration, and while it is pending (`settlement_pending`) the status is `processing`.
 
-On `/verify` the declaration is evaluated only once the payment itself verifies. Validating a declaration means compiling and running a JSON Schema the caller supplied, and `/verify` is unauthenticated, so an unsigned payload gets no header and buys no schema work.
+On `/verify` the declaration is evaluated only once the payment itself verifies. Validating a declaration means compiling and running a JSON Schema the caller supplied, and `/verify` is unauthenticated, so an unsigned payload gets no header and buys no schema work. `/verify` waits for the verdict for at most `DISCOVERY_SCHEMA_TIMEOUT_MS`, then reports `processing`. An evaluation that fails outright also reports `processing` rather than a 500. The payment result is never affected.
 
 #### Declaration hardening
 The declaration reaching `/verify` and `/settle` is attacker-controlled on both halves: the client supplies `schema` and the `info` it is checked against. Three things bound what that can cost:
@@ -115,7 +115,7 @@ The declaration reaching `/verify` and `/settle` is attacker-controlled on both 
 
 #### Known limitations
 - **A deferred declaration is never indexed.** If the schema validator is saturated or times out, the header says `processing`, the payment still settles, and the declaration is dropped: nothing persists it and nothing retries it. It is only catalogued if a later settlement carries it again.
-- **`/verify` and `/settle` share one schema validation queue.** `/verify` is unauthenticated and does not consume the nonce, so a replayed payload with a slow schema can fill the queue and push declarations on real settlements onto the deferred path above. The settlements themselves are not delayed.
+- **`/verify` and `/settle` share one schema validation queue.** `/verify` is unauthenticated and does not consume the nonce, so a replayed payload with a slow schema can fill the queue and push declarations on real settlements onto the deferred path above. Honest `/verify` calls meanwhile wait out their deadline and report `processing`; a saturated validator adds at most `DISCOVERY_SCHEMA_TIMEOUT_MS` to `/verify` and to the settle hook.
 
 Details in [`../docs/BAZAAR_DISCOVERY.md`](../docs/BAZAAR_DISCOVERY.md#known-limitations).
 
@@ -329,7 +329,9 @@ MAX_SETTLEMENT_AMOUNT=1000000000
 # Optional: Bazaar discovery. Off unless set to true; needs DATABASE_URL and migration 006
 DISCOVERY_ENABLED=false
 # Bazaar discovery hardening (only used when discovery is enabled)
-# Hard timeout for the worker that validates a declaration's JSON Schema (default: 250)
+# Hard timeout for the worker that validates a declaration's JSON Schema, and the longest
+# /verify and the settle hook wait for a verdict (default: 250). The first evaluation spawns
+# the validator worker (~100ms), so a budget below that reports processing on the first call
 DISCOVERY_SCHEMA_TIMEOUT_MS=250
 # Largest bazaar declaration accepted, in bytes (default: 16384)
 DISCOVERY_MAX_DECLARATION_BYTES=16384

@@ -181,6 +181,12 @@ the route takes no authentication, so an unsigned payload must not be able to sp
 The guard above is still what bounds the cost for a caller who can produce a valid
 payment; this only removes the free path.
 
+**`/verify` waits at most one validation budget.** Resource servers wait on `/verify` before they serve the paid
+request, so it is on the payment path too. It waits for the verdict for up to `DISCOVERY_SCHEMA_TIMEOUT_MS` and
+then answers `processing`, with the payment result untouched. An evaluation that fails outright also reports
+`processing`, where it used to surface as a 500. The deadline bounds the response, not the queue: the abandoned job
+still runs, so the queue limitation below applies unchanged.
+
 **Resource URLs are screened** (`src/resourceUrl.ts`) against the same classes of host the
 SDK already refuses for `iconUrl` — loopback, IPv4 literals, decimal- and hex-encoded
 hosts — plus IPv6 literals, internal-use suffixes, bare hostnames and embedded
@@ -241,8 +247,9 @@ Two rules limit the damage:
 
 ## Known limitations
 
-Two gaps are known and deliberately not yet closed. Neither delays a payment; both affect how reliably a declaration
-makes it into the catalog under load.
+Two gaps are known and deliberately not yet closed. Both affect how reliably a declaration makes it into the catalog
+under load. Neither can hold up a payment for longer than `DISCOVERY_SCHEMA_TIMEOUT_MS`: that is the most a saturated
+validator adds to `/verify`, and to the settle hook after the payer's transfer has landed.
 
 **A deferred declaration is lost permanently.** When the schema validator is saturated, a validation times out, or
 the verdict misses the settle hook's deadline, the declaration is reported `processing` and the settle carries on: the
@@ -258,8 +265,9 @@ facilitator does not hit this path; a third-party declaration under load can.
 `/verify` does not consume the nonce, so a single validly signed payload carrying a declaration with a backtracking
 `pattern` can be replayed against `/verify` to keep the queue full. Each replay costs the facilitator up to
 `DISCOVERY_SCHEMA_TIMEOUT_MS` of worker time, and declarations on real settlements arriving meanwhile get
-`unavailable` or miss the hook's deadline, are reported `processing`, and are then lost as described above. The
-settlements themselves are not held up. The rate limiter is the only thing bounding this today.
+`unavailable` or miss the hook's deadline, are reported `processing`, and are then lost as described above. Honest
+`/verify` calls meanwhile wait out their deadline and report `processing`. Payments go through, each delayed by at
+most `DISCOVERY_SCHEMA_TIMEOUT_MS` per call. The rate limiter is the only thing bounding the queue today.
 The remedy (separate queues per trust level, or a per-caller budget) is an open design decision.
 
 ## Files
