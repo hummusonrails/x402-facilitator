@@ -214,18 +214,22 @@ app.post('/verify', async (req: Request, res: Response) => {
   const logger = (req as any).logger;
   logger.info('POST /verify');
 
-  const parsed = parseFacilitatorRequest(req.body);
-  if (!parsed.ok) {
-    logger.warn('Invalid verify request', { reason: parsed.reason, message: parsed.message });
-    return res.status(400).json({
-      isValid: false,
-      invalidReason: parsed.reason,
-      invalidMessage: parsed.message,
-      ...(parsed.payer && { payer: parsed.payer }),
-    });
-  }
-
+  // parsing sits inside the try too: an async handler that throws outside it is an unhandled
+  // rejection under Express 4, so the request never gets a response
+  let payer: string | undefined;
   try {
+    const parsed = parseFacilitatorRequest(req.body);
+    if (!parsed.ok) {
+      logger.warn('Invalid verify request', { reason: parsed.reason, message: parsed.message });
+      return res.status(400).json({
+        isValid: false,
+        invalidReason: parsed.reason,
+        invalidMessage: parsed.message,
+        ...(parsed.payer && { payer: parsed.payer }),
+      });
+    }
+    payer = parsed.payment.authorization.from;
+
     const nonceLogger = logger.child({ nonce: parsed.payment.authorization.nonce });
     const { response } = await verifyPayment(parsed.payment, nonceLogger);
     res.json(response);
@@ -234,7 +238,7 @@ app.post('/verify', async (req: Request, res: Response) => {
     res.status(500).json({
       isValid: false,
       invalidReason: Errors.ErrUnexpectedVerifyError,
-      payer: parsed.payment.authorization.from,
+      ...(payer && { payer }),
     });
   }
 });
@@ -245,20 +249,23 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
   const merchantAddress = authReq.merchant!.address as Address;
   logger.info('POST /settle', { merchant: merchantAddress });
 
-  const parsed = parseFacilitatorRequest(req.body);
-  if (!parsed.ok) {
-    logger.warn('Invalid settle request', { reason: parsed.reason, message: parsed.message });
-    return res.status(400).json({
-      success: false,
-      errorReason: parsed.reason,
-      errorMessage: parsed.message,
-      ...(parsed.payer && { payer: parsed.payer }),
-      transaction: '',
-      network: parsed.network ?? config.network,
-    });
-  }
-
+  // see /verify: parsing stays inside the try so a throw becomes a 500, not an unhandled rejection
+  let payer: string | undefined;
   try {
+    const parsed = parseFacilitatorRequest(req.body);
+    if (!parsed.ok) {
+      logger.warn('Invalid settle request', { reason: parsed.reason, message: parsed.message });
+      return res.status(400).json({
+        success: false,
+        errorReason: parsed.reason,
+        errorMessage: parsed.message,
+        ...(parsed.payer && { payer: parsed.payer }),
+        transaction: '',
+        network: parsed.network ?? config.network,
+      });
+    }
+    payer = parsed.payment.authorization.from;
+
     const nonceLogger = logger.child({ nonce: parsed.payment.authorization.nonce, merchant: merchantAddress });
     const result = await settlePayment(parsed.payment, merchantAddress, nonceLogger);
     res.json(result);
@@ -267,7 +274,7 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
     res.status(500).json({
       success: false,
       errorReason: Errors.ErrUnexpectedSettleError,
-      payer: parsed.payment.authorization.from,
+      ...(payer && { payer }),
       transaction: '',
       network: config.network,
     });
