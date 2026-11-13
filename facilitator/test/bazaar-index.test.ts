@@ -4,12 +4,14 @@ import { createLogger } from '../src/logging.js';
 import { MERCHANT, RESOURCE_URL, normalizedPayment, validBazaarDeclaration } from './fixtures.js';
 
 // The store is replaced: these cases are about which origin indexBazaarResource checks and
-// writes, not about SQL (test/discoveryStore.test.ts covers that against real Postgres).
-const isOriginRegistered = vi.fn();
-const upsertDiscoveryResource = vi.fn();
+// writes, not about SQL (test/discoveryStore.test.ts covers the locked check-and-write
+// against real Postgres). `registered` stands in for discovery_merchant_origins.
+let registered: (origin: string) => boolean = () => false;
+const indexIfOriginRegistered = vi.fn(async (args: { origin: string }) =>
+  registered(args.origin) ? 'inserted' : 'origin_not_registered'
+);
 vi.mock('../src/discoveryStore.js', () => ({
-  isOriginRegistered: (...args: unknown[]) => isOriginRegistered(...args),
-  upsertDiscoveryResource: (...args: unknown[]) => upsertDiscoveryResource(...args),
+  indexIfOriginRegistered: (...args: [{ origin: string }]) => indexIfOriginRegistered(...args),
 }));
 
 const { indexBazaarResource } = await import('../src/bazaar.js');
@@ -26,14 +28,13 @@ function resource(resourceUrl: string): DiscoveredResource {
 }
 
 beforeEach(() => {
-  isOriginRegistered.mockReset();
-  upsertDiscoveryResource.mockReset();
-  upsertDiscoveryResource.mockResolvedValue('inserted');
+  registered = () => false;
+  indexIfOriginRegistered.mockClear();
 });
 
 describe('indexBazaarResource origin check', () => {
   it('indexes on a registered origin, writing the same normalized origin it checked', async () => {
-    isOriginRegistered.mockResolvedValue(true);
+    registered = () => true;
 
     const outcome = await indexBazaarResource(
       resource('https://API.Example.com:443/analyze'),
@@ -43,12 +44,12 @@ describe('indexBazaarResource origin check', () => {
     );
 
     expect(outcome).toBe('inserted');
-    expect(isOriginRegistered).toHaveBeenCalledWith('https://api.example.com', MERCHANT);
-    expect(upsertDiscoveryResource).toHaveBeenCalledWith(expect.objectContaining({ origin: 'https://api.example.com' }));
+    expect(indexIfOriginRegistered).toHaveBeenCalledWith(
+      expect.objectContaining({ origin: 'https://api.example.com', merchantAddress: MERCHANT })
+    );
   });
 
   it('refuses an origin not registered to the settling merchant and writes nothing', async () => {
-    isOriginRegistered.mockResolvedValue(false);
 
     const outcome = await indexBazaarResource(
       resource('https://someone-else.example.com/made-up'),
@@ -58,12 +59,11 @@ describe('indexBazaarResource origin check', () => {
     );
 
     expect(outcome).toBe('origin_not_registered');
-    expect(upsertDiscoveryResource).not.toHaveBeenCalled();
   });
 
   it('checks the canonical URL that is stored, not the payload resource.url', async () => {
     // The buyer's resource.url is on the registered origin; the catalogued URL is not
-    isOriginRegistered.mockImplementation(async (origin: string) => origin === new URL(RESOURCE_URL).origin);
+    registered = (origin) => origin === new URL(RESOURCE_URL).origin;
 
     const outcome = await indexBazaarResource(
       resource('https://someone-else.example.com/analyze'),
@@ -72,9 +72,8 @@ describe('indexBazaarResource origin check', () => {
       logger
     );
 
-    expect(isOriginRegistered).toHaveBeenCalledWith('https://someone-else.example.com', MERCHANT);
+    expect(indexIfOriginRegistered).toHaveBeenCalledWith(expect.objectContaining({ origin: 'https://someone-else.example.com' }));
     expect(outcome).toBe('origin_not_registered');
-    expect(upsertDiscoveryResource).not.toHaveBeenCalled();
   });
 
   it('fails closed on a canonical URL that does not parse, without throwing', async () => {
@@ -86,7 +85,6 @@ describe('indexBazaarResource origin check', () => {
     );
 
     expect(outcome).toBe('origin_not_registered');
-    expect(isOriginRegistered).not.toHaveBeenCalled();
-    expect(upsertDiscoveryResource).not.toHaveBeenCalled();
+    expect(indexIfOriginRegistered).not.toHaveBeenCalled();
   });
 });

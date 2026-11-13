@@ -7,7 +7,7 @@ import {
 import type { Address } from 'viem';
 import type { Response } from 'express';
 import type { NormalizedPayment } from './types.js';
-import { isOriginRegistered, upsertDiscoveryResource, type DiscoveryMetadata, type UpsertOutcome } from './discoveryStore.js';
+import { indexIfOriginRegistered, type DiscoveryMetadata, type IndexOutcome } from './discoveryStore.js';
 import { validateDeclarationSchema } from './schemaGuard.js';
 import { screenResourceUrl } from './resourceUrl.js';
 import { DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS, DISCOVERY_MAX_DECLARATION_BYTES } from './config.js';
@@ -199,7 +199,7 @@ export async function evaluateBazaarDeclaration(payment: NormalizedPayment, logg
 export const REJECTED_CLAIMED_BY_OTHER = 'resource claimed by another merchant';
 export const REJECTED_ORIGIN_NOT_REGISTERED = 'resource origin not registered for this merchant';
 
-export type IndexOutcome = UpsertOutcome | 'origin_not_registered';
+export type { IndexOutcome };
 
 /** The canonical URL's origin as URL.origin gives it, or null if it does not parse. */
 function originOf(url: string): string | null {
@@ -230,8 +230,9 @@ export async function indexBazaarResource(
   // origin is computed once, from the canonical URL that is stored, and the same value is
   // both checked and written, so the check and the tooling never parse different strings.
   // A URL that does not parse fails closed.
+  // The registration is checked inside the write's own transaction (see indexIfOriginRegistered).
   const origin = originOf(resource.resourceUrl);
-  if (origin === null || !(await isOriginRegistered(origin, merchantAddress))) {
+  const notRegistered = (): IndexOutcome => {
     logger.warn('Bazaar resource not catalogued', {
       resource: resource.resourceUrl,
       origin,
@@ -239,7 +240,8 @@ export async function indexBazaarResource(
       reason: REJECTED_ORIGIN_NOT_REGISTERED,
     });
     return 'origin_not_registered';
-  }
+  };
+  if (origin === null) return notRegistered();
 
   // The SDK sanitizes serviceName, tags and iconUrl but passes description and mimeType
   // through untouched, and every field here is republished on a public endpoint, so bound
@@ -260,7 +262,7 @@ export async function indexBazaarResource(
     ...(bazaarExtension !== undefined && { extensions: { [BAZAAR_KEY]: bazaarExtension } }),
   };
 
-  const outcome = await upsertDiscoveryResource({
+  const outcome = await indexIfOriginRegistered({
     resourceUrl: resource.resourceUrl,
     origin,
     type,
@@ -272,6 +274,7 @@ export async function indexBazaarResource(
     nonce: payment.authorization.nonce,
   });
 
+  if (outcome === 'origin_not_registered') return notRegistered();
   if (outcome === 'claimed_by_other') {
     logger.warn('Bazaar resource not catalogued', { resource: resource.resourceUrl, type, reason: REJECTED_CLAIMED_BY_OTHER });
   } else {

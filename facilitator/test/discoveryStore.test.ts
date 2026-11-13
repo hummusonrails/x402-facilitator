@@ -296,4 +296,94 @@ describeDb('origin registration (migration 007)', () => {
     await query(`UPDATE discovery_merchant_origins SET merchant_address = merchant_address`);
     expect(await count()).toBe(2);
   });
+
+  describe('indexIfOriginRegistered against a concurrent move', () => {
+    function args(merchant: `0x${string}`, resourceUrl = `${ORIGIN}/a`) {
+      return {
+        resourceUrl,
+        origin: ORIGIN,
+        type: 'http' as const,
+        x402Version: 2,
+        requirement: { scheme: 'exact' },
+        metadata: {},
+        merchantAddress: merchant,
+        nonce: '0x01',
+      };
+    }
+
+    /** Resolves once `n` backends are waiting on a lock, so the interleaving is deterministic */
+    async function blockedOnLock(n: number) {
+      for (let i = 0; i < 200; i++) {
+        const [{ waiting }] = await query(
+          `SELECT count(*)::int AS waiting FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`
+        );
+        if (waiting >= n) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(`expected ${n} backend(s) waiting on a lock`);
+    }
+
+    it('writes nothing when a move commits while it waits on the registration', async () => {
+      const { pool } = await dbModule;
+      const { indexIfOriginRegistered } = await storeModule;
+      await register(MERCHANT_A);
+
+      const mover = await pool.connect();
+      try {
+        await mover.query('BEGIN');
+        await mover.query(`UPDATE discovery_merchant_origins SET merchant_address = $2 WHERE origin = $1`, [ORIGIN, MERCHANT_B]);
+
+        // A has the registration as far as committed data goes; FOR SHARE has to wait for the move
+        const indexing = indexIfOriginRegistered(args(MERCHANT_A));
+        await blockedOnLock(1);
+        await mover.query('COMMIT');
+
+        expect(await indexing).toBe('origin_not_registered');
+      } finally {
+        mover.release();
+      }
+      expect(await count()).toBe(0);
+    });
+
+    it('makes a move wait for an index already under way, and the move then clears the row', async () => {
+      const { pool } = await dbModule;
+      const { indexIfOriginRegistered } = await storeModule;
+      await register(MERCHANT_A);
+
+      // Holds the row's key uncommitted, so the index blocks in its upsert, after FOR SHARE
+      const keyHolder = await pool.connect();
+      const mover = await pool.connect();
+      try {
+        await keyHolder.query('BEGIN');
+        await keyHolder.query(
+          `INSERT INTO discovery_resources (resource_url, resource_type, tool_name, x402_version, accepts, metadata, merchant_address, last_nonce, origin)
+           VALUES ($1, 'http', '', 2, '[]', '{}', decode(substr($2, 3), 'hex'), 'n', $3)`,
+          [`${ORIGIN}/a`, MERCHANT_A, ORIGIN]
+        );
+        const indexing = indexIfOriginRegistered(args(MERCHANT_A));
+        await blockedOnLock(1);
+
+        const moving = mover.query(`UPDATE discovery_merchant_origins SET merchant_address = $2 WHERE origin = $1`, [ORIGIN, MERCHANT_B]);
+        await blockedOnLock(2);
+
+        await keyHolder.query('ROLLBACK');
+        expect(await indexing).toBe('inserted');
+        await moving;
+      } finally {
+        keyHolder.release();
+        mover.release();
+      }
+      // The move ran after the index committed, so its trigger saw the row and removed it
+      expect(await count()).toBe(0);
+      const [{ merchant }] = await query(`SELECT merchant_address AS merchant FROM discovery_merchant_origins WHERE origin = $1`, [ORIGIN]);
+      expect(merchant).toBe(MERCHANT_B);
+    });
+
+    it('reports an unregistered origin without writing', async () => {
+      const { indexIfOriginRegistered } = await storeModule;
+      await register(MERCHANT_B);
+      expect(await indexIfOriginRegistered(args(MERCHANT_A))).toBe('origin_not_registered');
+      expect(await count()).toBe(0);
+    });
+  });
 });

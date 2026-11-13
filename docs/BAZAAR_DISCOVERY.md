@@ -226,8 +226,10 @@ Three rules hold the catalog together:
   an origin; it is refused, naming the current holder, if another merchant already holds it. A settlement whose
   catalogued URL is on an origin not registered to the settling merchant is reported as
   `rejected` / `resource origin not registered for this merchant` and indexes nothing. The check uses the canonical
-  URL, so a lookalike `resource.url` does not get around it, and a URL that does not parse fails closed. A merchant
-  with no registered origin gets nothing indexed. `/verify` is unauthenticated and so has no merchant to check
+  URL, so a lookalike `resource.url` does not get around it, and a URL that does not parse fails closed. The check
+  runs inside the catalog write's own transaction, holding `FOR SHARE` on the registration row, so a concurrent
+  `origins move` or `remove` either waits for the write (and its cleanup then removes the row) or lands first and the
+  write sees the new holder and does nothing. A merchant with no registered origin gets nothing indexed. `/verify` is unauthenticated and so has no merchant to check
   against: there a valid declaration is reported `processing`, and only `/settle` can reject it on these grounds.
   Reads follow the same rule: `GET /discovery/resources` serves only entries on an origin registered to their owner.
   Entries written before migration 007 are kept, not deleted, but are not served until their origin is registered

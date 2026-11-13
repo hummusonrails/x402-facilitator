@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import { pool } from './db.js';
 import { createLogger } from './logging.js';
 
@@ -31,6 +32,7 @@ export interface DiscoveryUpsert {
 }
 
 export type UpsertOutcome = 'inserted' | 'updated' | 'claimed_by_other';
+export type IndexOutcome = UpsertOutcome | 'origin_not_registered';
 
 /** Wire shape of one item in GET /discovery/resources, matching the bazaar DiscoveryResource type. */
 export interface DiscoveryItem {
@@ -97,8 +99,49 @@ export async function isOriginRegistered(origin: string, merchantAddress: string
  * Callers must only invoke this after the payment carrying the declaration has confirmed.
  */
 export async function upsertDiscoveryResource(args: DiscoveryUpsert): Promise<UpsertOutcome> {
+  return upsertWith(pool, args);
+}
+
+/**
+ * Index a catalog entry only if its origin is registered to the settling merchant, with the
+ * check and the write in one transaction. `FOR SHARE` on the registration row means a
+ * concurrent `pnpm discovery origins move` or `remove` either waits for this write (and its
+ * trigger then removes the row) or commits first, in which case the re-checked row no longer
+ * names this merchant and nothing is written. Checking and writing as separate statements
+ * would let a move land in between and leave the old holder's row behind it.
+ */
+export async function indexIfOriginRegistered(args: DiscoveryUpsert): Promise<IndexOutcome> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT 1 FROM discovery_merchant_origins
+       WHERE origin = $1 AND LOWER(merchant_address) = LOWER($2)
+       FOR SHARE`,
+      [args.origin, args.merchantAddress]
+    );
+    if (rows.length === 0) {
+      await client.query('ROLLBACK');
+      return 'origin_not_registered';
+    }
+    const outcome = await upsertWith(client, args);
+    await client.query('COMMIT');
+    return outcome;
+  } catch (error: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    // 42P01 = undefined_table: migration 007 has not been applied to this database
+    if (error.code === '42P01') {
+      logger.error('Discovery origin registrations missing; apply migrations/007_discovery_origins.sql');
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function upsertWith(db: Pick<PoolClient, 'query'>, args: DiscoveryUpsert): Promise<UpsertOutcome> {
   const requirementJson = JSON.stringify([args.requirement]);
-  const { rows } = await pool.query(
+  const { rows } = await db.query(
     `INSERT INTO discovery_resources
        (resource_url, resource_type, tool_name, x402_version, accepts, metadata, merchant_address, last_nonce, origin)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, decode(substr($7, 3), 'hex'), $8, $9)
