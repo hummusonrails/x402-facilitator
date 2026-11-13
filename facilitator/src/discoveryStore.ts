@@ -217,10 +217,16 @@ export async function listDiscoveryResources(query: DiscoveryQuery): Promise<{ i
   // already enforces this for new rows; this covers rows written before migration 007,
   // which it left in place rather than delete. A NULL origin never matches, so rows the
   // backfill could not normalize are not served either.
+  // The owner must also clear the bar /settle sets (enabled, and approved: migration 003),
+  // so disabling a merchant takes its entries off the public catalog, not only stops new
+  // ones. IS TRUE treats NULL as not enabled / not approved, as authenticateMerchant does.
   const where: string[] = [
     `EXISTS (SELECT 1 FROM discovery_merchant_origins o
+             JOIN merchants m ON LOWER(m.address) = LOWER(o.merchant_address)
              WHERE o.origin = discovery_resources.origin
-               AND discovery_resources.merchant_address = decode(regexp_replace(lower(o.merchant_address), '^0x', ''), 'hex'))`,
+               AND discovery_resources.merchant_address = decode(regexp_replace(lower(o.merchant_address), '^0x', ''), 'hex')
+               AND m.enabled IS TRUE
+               AND m.approved IS TRUE)`,
   ];
   const values: any[] = [];
 

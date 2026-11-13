@@ -13,7 +13,9 @@ the extension existed: `/supported` advertises no extensions, `/verify` and `/se
 To turn it on:
 
 1. Apply migrations 006 and 007 to an existing database (a fresh Docker database picks them up on init):
-   `pnpm migrate migrations/006_discovery_resources.sql` and `pnpm migrate migrations/007_discovery_origins.sql`
+   `pnpm migrate migrations/006_discovery_resources.sql` and `pnpm migrate migrations/007_discovery_origins.sql`.
+   They build on the merchant tables from 002 and 003 (`merchants.approved`), which any database that runs the
+   merchant dashboard already has; without 003 the catalog returns 503.
 2. Register the origin each selling merchant serves its resources from:
    `pnpm discovery origins add <merchant> <origin>`, for example `https://api.example.com`. Nothing is catalogued
    for a merchant with no registered origin.
@@ -231,7 +233,10 @@ Three rules hold the catalog together:
   `origins move` or `remove` either waits for the write (and its cleanup then removes the row) or lands first and the
   write sees the new holder and does nothing. A merchant with no registered origin gets nothing indexed. `/verify` is unauthenticated and so has no merchant to check
   against: there a valid declaration is reported `processing`, and only `/settle` can reject it on these grounds.
-  Reads follow the same rule: `GET /discovery/resources` serves only entries on an origin registered to their owner.
+  Reads follow the same rule: `GET /discovery/resources` serves only entries on an origin registered to their owner,
+  and only while that owner is enabled and approved, the same bar `/settle` sets. Disabling a merchant
+  (`pnpm merchants disable`, or the dashboard) hides its entries at once; they are kept, and re-enabling brings them
+  back.
   Entries written before migration 007 are kept, not deleted, but are not served until their origin is registered
   to their owner, and an entry whose origin the backfill could not normalize is never served.
 - **Catalog entries follow their origin's registration.** A trigger on `discovery_merchant_origins` keeps them in

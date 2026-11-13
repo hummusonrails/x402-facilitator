@@ -18,7 +18,11 @@ vi.mock('../src/clients.js', () => ({
 }));
 // Controllable per test: /supported only advertises bazaar when there is an index to write to
 const database = { configured: false };
-vi.mock('../src/db.js', () => ({ isDatabaseConfigured: () => database.configured, pool: {} }));
+const poolQuery = vi.fn();
+vi.mock('../src/db.js', () => ({
+  isDatabaseConfigured: () => database.configured,
+  pool: { query: (...args: unknown[]) => poolQuery(...args) },
+}));
 vi.mock('../src/merchantStore.js', () => ({ getAllMerchants: async () => [], getMerchantByAddress: async () => null }));
 // Controllable per test: /verify only evaluates declarations once the payment verifies
 const verifyResult: { isValid: boolean; invalidReason?: string; payer: string } = { isValid: true, payer: PAYER };
@@ -54,6 +58,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   database.configured = false;
+  poolQuery.mockReset();
   verifyResult.isValid = true;
   delete verifyResult.invalidReason;
   evaluateBazaarDeclaration.mockReset();
@@ -160,5 +165,16 @@ describe('GET /discovery/resources', () => {
 
   it('returns 503 when no database is configured', async () => {
     expect((await fetch(`${base}/discovery/resources`)).status).toBe(503);
+  });
+
+  it('returns 503, not 500, when a required migration is missing', async () => {
+    database.configured = true;
+    // 42P01: 006/007 not applied. 42703: merchants.approved missing, 003 not applied.
+    for (const code of ['42P01', '42703']) {
+      poolQuery.mockRejectedValueOnce(Object.assign(new Error('missing'), { code }));
+      const res = await fetch(`${base}/discovery/resources`);
+      expect(res.status, code).toBe(503);
+      expect(await res.json()).toMatchObject({ message: 'Discovery index is not initialized' });
+    }
   });
 });

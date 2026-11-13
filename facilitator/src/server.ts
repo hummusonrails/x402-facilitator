@@ -459,9 +459,14 @@ app.get('/discovery/resources', async (req: Request, res: Response, next: NextFu
       pagination: { limit, offset, total },
     });
   } catch (error: any) {
-    // 42P01 = undefined_table: migration 006 or 007 has not been applied to this database
-    if (error.code === '42P01') {
-      logger.error('Discovery tables missing; apply migrations/006_discovery_resources.sql and 007_discovery_origins.sql');
+    // 42P01 = undefined_table: migration 006 or 007 has not been applied to this database.
+    // 42703 = undefined_column: merchants.approved is missing, so 003 has not been applied.
+    if (error.code === '42P01' || error.code === '42703') {
+      logger.error(
+        error.code === '42703'
+          ? 'Discovery listing needs merchants.approved; apply migrations/003_merchant_approval.sql'
+          : 'Discovery tables missing; apply migrations/006_discovery_resources.sql and 007_discovery_origins.sql'
+      );
       return res.status(503).json({
         error: 'Discovery unavailable',
         message: 'Discovery index is not initialized',

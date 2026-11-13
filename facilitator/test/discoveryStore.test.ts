@@ -27,9 +27,14 @@ const ORIGIN = 'https://api.example.com';
 if (TEST_DATABASE_URL) {
   beforeAll(async () => {
     const { pool } = await dbModule;
-    // 007 references merchants(address); 002 is not idempotent, so apply it only once
+    // 007 references merchants(address), and the listing checks merchants.approved (003).
+    // Neither 002 nor 003 is idempotent, so apply each only once.
     const { rows } = await pool.query(`SELECT to_regclass('merchants') IS NOT NULL AS present`);
     if (!rows[0].present) await pool.query(migration('002_merchants.sql'));
+    const { rows: cols } = await pool.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_name = 'merchants' AND column_name = 'approved'`
+    );
+    if (cols.length === 0) await pool.query(migration('003_merchant_approval.sql'));
   });
 
   beforeEach(async () => {
@@ -40,7 +45,7 @@ if (TEST_DATABASE_URL) {
     await pool.query('TRUNCATE discovery_resources, discovery_merchant_origins');
     await pool.query('DELETE FROM merchants WHERE address = ANY($1)', [[MERCHANT_A, MERCHANT_B]]);
     await pool.query(
-      `INSERT INTO merchants (address, name, api_key_hash) VALUES ($1, 'A', 'x'), ($2, 'B', 'x')`,
+      `INSERT INTO merchants (address, name, api_key_hash, enabled, approved) VALUES ($1, 'A', 'x', true, true), ($2, 'B', 'x', true, true)`,
       [MERCHANT_A, MERCHANT_B]
     );
   });
@@ -284,6 +289,29 @@ describeDb('origin registration (migration 007)', () => {
 
     // Past the last page the total comes from the same filter
     expect((await listDiscoveryResources({ limit: 20, offset: 5 })).total).toBe(1);
+  });
+
+  it('serves entries only while their owner is enabled and approved, the bar /settle sets', async () => {
+    const { listDiscoveryResources } = await storeModule;
+    await register(MERCHANT_A);
+    await index(MERCHANT_A, `${ORIGIN}/served`);
+    const served = async () => (await listDiscoveryResources({ limit: 20, offset: 0 })).items.map((item) => item.resource);
+
+    expect(await served()).toEqual([`${ORIGIN}/served`]);
+
+    await query(`UPDATE merchants SET enabled = false WHERE address = $1`, [MERCHANT_A]);
+    expect(await served()).toEqual([]);
+    expect((await listDiscoveryResources({ limit: 20, offset: 0 })).total).toBe(0);
+
+    // Hidden, not deleted: re-enabling brings the entry back
+    await query(`UPDATE merchants SET enabled = true WHERE address = $1`, [MERCHANT_A]);
+    expect(await served()).toEqual([`${ORIGIN}/served`]);
+
+    await query(`UPDATE merchants SET approved = false WHERE address = $1`, [MERCHANT_A]);
+    expect(await served()).toEqual([]);
+    // NULL counts as not approved, as it does in authenticateMerchant
+    await query(`UPDATE merchants SET approved = NULL WHERE address = $1`, [MERCHANT_A]);
+    expect(await served()).toEqual([]);
   });
 
   it('an update that is not a move deletes nothing', async () => {
