@@ -314,6 +314,27 @@ describeDb('origin registration (migration 007)', () => {
     expect(await served()).toEqual([]);
   });
 
+  it('filters on an extension key the entry carries', async () => {
+    const { listDiscoveryResources, upsertDiscoveryResource } = await storeModule;
+    await register(MERCHANT_A);
+    await upsertDiscoveryResource({
+      resourceUrl: `${ORIGIN}/declared`,
+      origin: ORIGIN,
+      type: 'http',
+      x402Version: 2,
+      requirement: { scheme: 'exact' },
+      metadata: { extensions: { bazaar: { info: {} } } },
+      merchantAddress: MERCHANT_A,
+      nonce: '0x01',
+    });
+    await index(MERCHANT_A, `${ORIGIN}/bare`);
+
+    const keys = async (extensions: string) =>
+      (await listDiscoveryResources({ extensions, limit: 20, offset: 0 })).items.map((item) => item.resource);
+    expect(await keys('bazaar')).toEqual([`${ORIGIN}/declared`]);
+    expect(await keys('other')).toEqual([]);
+  });
+
   it('an update that is not a move deletes nothing', async () => {
     await register(MERCHANT_A);
     await index(MERCHANT_A, `${ORIGIN}/a`);

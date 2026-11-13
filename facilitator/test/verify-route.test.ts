@@ -167,6 +167,17 @@ describe('GET /discovery/resources', () => {
     expect((await fetch(`${base}/discovery/resources`)).status).toBe(503);
   });
 
+  it('passes the extensions filter through as a key-presence match on the stored extensions', async () => {
+    database.configured = true;
+    // An empty page, then the count query
+    poolQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ total: '0' }] });
+    const res = await fetch(`${base}/discovery/resources?extensions=bazaar`);
+    expect(res.status).toBe(200);
+    const [sql, values] = poolQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toMatch(/metadata->'extensions' \? \$1/);
+    expect(values[0]).toBe('bazaar');
+  });
+
   it('returns 503, not 500, when a required migration is missing', async () => {
     database.configured = true;
     // 42P01: 006/007 not applied. 42703: merchants.approved missing, 003 not applied.

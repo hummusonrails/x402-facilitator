@@ -444,6 +444,7 @@ app.get('/discovery/resources', async (req: Request, res: Response, next: NextFu
   const payTo = stringFilter(req.query.payTo);
   const scheme = stringFilter(req.query.scheme);
   const network = stringFilter(req.query.network);
+  const extensions = stringFilter(req.query.extensions);
 
   if (!isDatabaseConfigured()) {
     logger.warn('GET /discovery/resources unavailable: database not configured');
@@ -451,8 +452,8 @@ app.get('/discovery/resources', async (req: Request, res: Response, next: NextFu
   }
 
   try {
-    const { items, total } = await listDiscoveryResources({ type, payTo, scheme, network, limit, offset });
-    logger.info('GET /discovery/resources', { type, payTo, scheme, network, limit, offset, returned: items.length, total });
+    const { items, total } = await listDiscoveryResources({ type, payTo, scheme, network, extensions, limit, offset });
+    logger.info('GET /discovery/resources', { type, payTo, scheme, network, extensions, limit, offset, returned: items.length, total });
     res.json({
       x402Version: 2,
       items,

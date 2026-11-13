@@ -54,6 +54,8 @@ export interface DiscoveryQuery {
   payTo?: string;
   scheme?: string;
   network?: string;
+  /** An extension key the entry must carry, e.g. `bazaar` */
+  extensions?: string;
   limit: number;
   offset: number;
 }
@@ -209,7 +211,8 @@ function toItem(row: any): DiscoveryItem {
 
 /**
  * Page through the catalog, newest first. `network` and `scheme` match any entry in
- * `accepts` via jsonb containment (GIN indexed); `payTo` compares case-insensitively.
+ * `accepts` via jsonb containment (GIN indexed); `payTo` compares case-insensitively;
+ * `extensions` matches entries carrying that extension key.
  * Returns the total matching count for `pagination.total`.
  */
 export async function listDiscoveryResources(query: DiscoveryQuery): Promise<{ items: DiscoveryItem[]; total: number }> {
@@ -241,6 +244,10 @@ export async function listDiscoveryResources(query: DiscoveryQuery): Promise<{ i
   if (query.scheme) {
     values.push(JSON.stringify([{ scheme: query.scheme }]));
     where.push(`accepts @> $${values.length}::jsonb`);
+  }
+  if (query.extensions) {
+    values.push(query.extensions);
+    where.push(`metadata->'extensions' ? $${values.length}`);
   }
   if (query.payTo) {
     values.push(query.payTo.toLowerCase());
