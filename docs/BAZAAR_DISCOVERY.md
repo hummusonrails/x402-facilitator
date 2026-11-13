@@ -173,8 +173,12 @@ shared with unauthenticated `/verify`, so on `/settle` the evaluation starts alo
 before it, and the payer's transfer is submitted without waiting for a verdict. The verdict is awaited only in the
 post-confirmation hook, which sits before the merchant forward, and only for up to `DISCOVERY_SCHEMA_TIMEOUT_MS`.
 Normally it arrived long before the transfer confirmed and is reported as is (`rejected` with its reason, or
-indexed and `success`). If the queue is backed up and the deadline passes, the header says `processing` and nothing
-is indexed, so a saturated validator costs a settlement at most one validation budget, after the payment has landed.
+indexed and `success`). If the queue is backed up and the deadline passes, the header says `processing` and the
+settlement carries on, so a saturated validator costs a settlement at most one validation budget, after the payment
+has landed. `processing` keeps its spec meaning, "being catalogued asynchronously": the work is not abandoned at the
+deadline but finishes after the response has gone out, and a valid declaration is indexed when its verdict lands.
+Only a declaration no verdict is ever reached on (the validator saturated, or the validation timed out) is not
+indexed.
 
 The verdict is tied to the payment. If the payment fails, `/settle` sends no `bazaar` status at all, even for a
 malformed declaration; while it is still pending (`settlement_pending`) the status is `processing`. Reporting a
@@ -267,12 +271,12 @@ Two gaps are known and deliberately not yet closed. Both affect how reliably a d
 under load. Neither can hold up a payment for longer than `DISCOVERY_SCHEMA_TIMEOUT_MS`: that is the most a saturated
 validator adds to `/verify`, and to the settle hook after the payer's transfer has landed.
 
-**A deferred declaration is lost permanently.** When the schema validator is saturated, a validation times out, or
-the verdict misses the settle hook's deadline, the declaration is reported `processing` and the settle carries on: the
-payment confirms and the nonce is consumed.
-Nothing persists the pending declaration, so it is never indexed and there is no retry path. `processing` here does
-not mean "will arrive later"; the seller has to settle another payment carrying the declaration for it to be
-catalogued. Closing this means storing the declaration beside the payment row and teaching the recovery worker
+**A declaration no verdict is reached on is lost.** When the schema validator is saturated or a validation times
+out, the declaration is reported `processing` and the settle carries on: the payment confirms and the nonce is
+consumed. A verdict that merely arrives after the hook's deadline is still indexed once it lands, but a declaration
+the validator never rules on is not, and nothing persists it for a retry; the seller has to settle another payment
+carrying the declaration for it to be catalogued. Late indexing also lives only in memory, so a restart between the
+response and the verdict loses that one entry the same way. Closing this means storing the declaration beside the payment row and teaching the recovery worker
 (`src/recovery.ts`) to index it, which is a schema change plus a worker change. A small, honest declaration on an idle
 facilitator does not hit this path; a third-party declaration under load can.
 
@@ -281,7 +285,7 @@ facilitator does not hit this path; a third-party declaration under load can.
 `/verify` does not consume the nonce, so a single validly signed payload carrying a declaration with a backtracking
 `pattern` can be replayed against `/verify` to keep the queue full. Each replay costs the facilitator up to
 `DISCOVERY_SCHEMA_TIMEOUT_MS` of worker time, and declarations on real settlements arriving meanwhile get
-`unavailable` or miss the hook's deadline, are reported `processing`, and are then lost as described above. Honest
+`unavailable` or time out, are reported `processing`, and are then lost as described above. Honest
 `/verify` calls meanwhile wait out their deadline and report `processing`. Payments go through, each delayed by at
 most `DISCOVERY_SCHEMA_TIMEOUT_MS` per call. The rate limiter is the only thing bounding the queue today.
 The remedy (separate queues per trust level, or a per-caller budget) is an open design decision.

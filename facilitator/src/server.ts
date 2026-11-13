@@ -72,6 +72,44 @@ function startBazaarEvaluation(payment: NormalizedPayment, logger: Logger): Prom
   });
 }
 
+/**
+ * Everything discovery does with a declaration once the payer's transfer has confirmed:
+ * wait for the verdict, then index. Resolves to the status to report. Never rejects: a crash
+ * anywhere in here is logged and reported as `processing`.
+ *
+ * The settle hook waits on this for at most one validation budget and reports `processing`
+ * if it is not done by then, but the promise is not abandoned: it keeps running after the
+ * response has gone out and indexes when the verdict lands, which is what `processing` means
+ * in the spec ("being catalogued asynchronously"). Only a declaration no verdict is ever
+ * reached on (`deferred`: validator saturated or timed out) is not indexed.
+ */
+function catalogueDeclaration(
+  evaluation: Promise<BazaarEvaluation>,
+  payment: NormalizedPayment,
+  merchantAddress: Address,
+  logger: Logger
+): Promise<BazaarExtensionResponse | undefined> {
+  const run = async (): Promise<BazaarExtensionResponse | undefined> => {
+    const bazaar = await evaluation;
+    if (!bazaar.declared) return undefined;
+    if (!bazaar.valid) return bazaarStatusFor(bazaar);
+    if (!isDatabaseConfigured()) {
+      logger.warn('Bazaar declaration not indexed: database not configured');
+      return { status: 'rejected', rejectedReason: 'discovery index unavailable' };
+    }
+    const outcome = await indexBazaarResource(bazaar.resource, payment, merchantAddress, logger);
+    return outcome === 'claimed_by_other'
+      ? { status: 'rejected', rejectedReason: REJECTED_CLAIMED_BY_OTHER }
+      : outcome === 'origin_not_registered'
+        ? { status: 'rejected', rejectedReason: REJECTED_ORIGIN_NOT_REGISTERED }
+        : { status: 'success' };
+  };
+  return run().catch((error: any): BazaarExtensionResponse => {
+    logger.error('Bazaar indexing failed', { error: error.message });
+    return { status: 'processing' };
+  });
+}
+
 const app: Express = express();
 
 app.use(express.json({ limit: BODY_SIZE_LIMIT }));
@@ -349,35 +387,20 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
     const result = await settlePayment(parsed.payment, merchantAddress, nonceLogger, evaluation ? {
       // Runs only after the payer's transfer is confirmed, so unpaid declarations are never indexed
       onIncomingConfirmed: async () => {
+        // Started here, so only a confirmed payment is ever catalogued, and not abandoned at
+        // the deadline: it finishes after the response if it has to (see catalogueDeclaration).
+        const catalogue = catalogueDeclaration(evaluation, parsed.payment, merchantAddress, nonceLogger);
         // The hook sits before the merchant forward, so wait at most one validation budget.
-        // Normally the verdict is long since in; only a backed-up queue misses the deadline.
-        const bazaar = await withDeadline(evaluation, DISCOVERY_SCHEMA_TIMEOUT_MS);
-        if (!bazaar) {
-          nonceLogger.warn('Bazaar verdict not ready by the deadline, not indexing');
-          bazaarResponse = { status: 'processing' };
+        const done = await withDeadline(catalogue.then((status) => ({ status })), DISCOVERY_SCHEMA_TIMEOUT_MS);
+        if (done) {
+          bazaarResponse = done.status;
           return;
         }
-        if (!bazaar.declared) return;
-        if (!bazaar.valid) {
-          bazaarResponse = bazaarStatusFor(bazaar);
-          return;
-        }
-        if (!isDatabaseConfigured()) {
-          nonceLogger.warn('Bazaar declaration not indexed: database not configured');
-          bazaarResponse = { status: 'rejected', rejectedReason: 'discovery index unavailable' };
-          return;
-        }
-        try {
-          const outcome = await indexBazaarResource(bazaar.resource, parsed.payment, merchantAddress, nonceLogger);
-          bazaarResponse = outcome === 'claimed_by_other'
-            ? { status: 'rejected', rejectedReason: REJECTED_CLAIMED_BY_OTHER }
-            : outcome === 'origin_not_registered'
-              ? { status: 'rejected', rejectedReason: REJECTED_ORIGIN_NOT_REGISTERED }
-              : { status: 'success' };
-        } catch (error: any) {
-          nonceLogger.error('Bazaar indexing failed', { error: error.message });
-          bazaarResponse = { status: 'processing' };
-        }
+        nonceLogger.warn('Bazaar declaration not catalogued by the deadline; finishing after the response');
+        bazaarResponse = { status: 'processing' };
+        void catalogue.then((status) => {
+          nonceLogger.info('Bazaar declaration finished after the response', { status: status?.status, rejectedReason: status?.rejectedReason });
+        });
       },
     } : undefined);
 

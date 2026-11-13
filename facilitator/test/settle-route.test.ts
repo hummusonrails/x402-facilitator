@@ -136,6 +136,58 @@ describe('POST /settle with a bazaar declaration', () => {
     expect(header).toEqual({ bazaar: { status: 'rejected', rejectedReason: 'resource origin not registered for this merchant' } });
   });
 
+  it('reports processing at the deadline and still indexes once a late verdict lands', async () => {
+    const verdict = deferred<unknown>();
+    evaluateBazaarDeclaration.mockReturnValue(verdict.promise);
+    settlePayment.mockImplementation(confirmingSettle);
+
+    const { status, header } = await settle(facilitatorRequest(validBazaarDeclaration()));
+    expect(status).toBe(200);
+    expect(header).toEqual({ bazaar: { status: 'processing' } });
+    // The response is out and nothing is indexed yet; the verdict lands afterwards
+    expect(indexBazaarResource).not.toHaveBeenCalled();
+    verdict.resolve(VALID);
+    await vi.waitFor(() => expect(indexBazaarResource).toHaveBeenCalledTimes(1));
+  });
+
+  it('indexes nothing when the late verdict is a rejection', async () => {
+    const verdict = deferred<unknown>();
+    evaluateBazaarDeclaration.mockReturnValue(verdict.promise);
+    settlePayment.mockImplementation(confirmingSettle);
+
+    const { header } = await settle(facilitatorRequest(validBazaarDeclaration()));
+    expect(header).toEqual({ bazaar: { status: 'processing' } });
+    verdict.resolve({ declared: true, valid: false, rejectedReason: 'bad' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(indexBazaarResource).not.toHaveBeenCalled();
+  });
+
+  it('never indexes a declaration no verdict was reached on, early or late', async () => {
+    const verdict = deferred<unknown>();
+    evaluateBazaarDeclaration.mockReturnValue(verdict.promise);
+    settlePayment.mockImplementation(confirmingSettle);
+
+    const { header } = await settle(facilitatorRequest(validBazaarDeclaration()));
+    expect(header).toEqual({ bazaar: { status: 'processing' } });
+    verdict.resolve({ declared: true, valid: false, deferred: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(indexBazaarResource).not.toHaveBeenCalled();
+  });
+
+  it('logs and swallows an indexing failure that happens after the response', async () => {
+    const verdict = deferred<unknown>();
+    evaluateBazaarDeclaration.mockReturnValue(verdict.promise);
+    indexBazaarResource.mockRejectedValue(new Error('database went away'));
+    settlePayment.mockImplementation(confirmingSettle);
+
+    const { header } = await settle(facilitatorRequest(validBazaarDeclaration()));
+    expect(header).toEqual({ bazaar: { status: 'processing' } });
+    verdict.resolve(VALID);
+    // An unhandled rejection here would fail the run; reaching the call is enough
+    await vi.waitFor(() => expect(indexBazaarResource).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+
   it('stops waiting at the deadline, reports processing and indexes nothing', async () => {
     evaluateBazaarDeclaration.mockReturnValue(new Promise(() => {}));
     settlePayment.mockImplementation(confirmingSettle);
