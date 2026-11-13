@@ -20,6 +20,8 @@ import { Pool, type PoolClient } from 'pg';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  // Same switch as src/db.ts and scripts/apply-migration.ts, for databases that require SSL
+  ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : undefined,
 });
 
 /** The origin the facilitator will compare against: URL.origin of a bare scheme://host[:port]. */

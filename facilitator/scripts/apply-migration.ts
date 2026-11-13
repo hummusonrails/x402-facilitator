@@ -9,9 +9,10 @@
  *
  * Usage:
  *   pnpm migrate migrations/006_discovery_resources.sql
+ *   pnpm migrate migrations/007_discovery_origins.sql
  *
  * Only migrations written to be idempotent (CREATE ... IF NOT EXISTS throughout) are safe
- * to run this way; 006 is. It does not track which migrations have run, so it will not
+ * to run this way; 006 and 007 are. It does not track which migrations have run, so it will not
  * bring an old database up to date on its own.
  */
 
@@ -23,7 +24,7 @@ import { Pool } from 'pg';
 async function main(): Promise<void> {
   const file = process.argv[2];
   if (!file) {
-    console.error('Usage: pnpm migrate <path-to-migration.sql>');
+    console.error('Usage: pnpm migrate <path-to-migration.sql>   (idempotent: 006_discovery_resources.sql, 007_discovery_origins.sql)');
     process.exit(1);
   }
   if (!process.env.DATABASE_URL) {
