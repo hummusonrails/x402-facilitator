@@ -14,6 +14,16 @@ const useDatabase = isDatabaseConfigured();
 
 const TRANSFER_EVENT_ABI = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 
+/**
+ * Optional callbacks around settlement. `onIncomingConfirmed` runs once the payer's
+ * transfer has confirmed with the expected Transfer event (status `incoming_complete`),
+ * before the merchant forward. Errors thrown by hooks are logged and never fail the
+ * settlement; they exist for side effects such as discovery indexing.
+ */
+export interface SettleHooks {
+  onIncomingConfirmed?: (context: { nonce: string; incomingHash: Hex; merchantAddress: Address }) => Promise<void>;
+}
+
 // In-memory fallbacks when no database is configured (not safe across restarts or replicas)
 const claimedNonces = new Set<string>();
 const pendingIncoming = new Map<string, { hash: Hex; merchantAddress: string; totalAmount: bigint }>();
@@ -69,7 +79,8 @@ async function completeSettlement(
   incomingHash: Hex,
   merchantAddress: Address,
   fees: FeeSplit,
-  logger: Logger
+  logger: Logger,
+  hooks?: SettleHooks
 ): Promise<SettleResponse> {
   const payer = payment.authorization.from;
   const nonce = payment.authorization.nonce;
@@ -113,6 +124,14 @@ async function completeSettlement(
 
   logger.info('Incoming transfer confirmed', { hash: incomingHash, blockNumber: incomingReceipt.blockNumber.toString() });
   await recordStatus(nonce, 'incoming_complete', undefined, { txHash: incomingHash, blockNumber: incomingReceipt.blockNumber.toString() });
+
+  if (hooks?.onIncomingConfirmed) {
+    try {
+      await hooks.onIncomingConfirmed({ nonce, incomingHash, merchantAddress });
+    } catch (error: any) {
+      logger.error('onIncomingConfirmed hook failed, continuing settlement', { error: error.message });
+    }
+  }
 
   // The payer's payment has landed at payTo, so settlement has succeeded from the
   // protocol's point of view. Forwarding to the merchant is facilitator bookkeeping;
@@ -171,7 +190,8 @@ async function completeSettlement(
 export async function settlePayment(
   payment: NormalizedPayment,
   merchantAddress: Address,
-  logger: Logger
+  logger: Logger,
+  hooks?: SettleHooks
 ): Promise<SettleResponse> {
   const payer = payment.authorization.from;
   const nonce = payment.authorization.nonce;
@@ -206,7 +226,7 @@ export async function settlePayment(
       return failure(payer, Errors.ErrNonceAlreadyUsed);
     }
     logger.info('Reconciling pending settlement', { hash: pending.hash });
-    return completeSettlement(payment, pending.hash, merchantAddress, fees, logger);
+    return completeSettlement(payment, pending.hash, merchantAddress, fees, logger, hooks);
   }
 
   // Re-verify immediately before settling, including simulation so the
@@ -268,5 +288,5 @@ export async function settlePayment(
 
   await recordStatus(nonce, 'incoming_submitted', { incomingTxHash: incomingHash }, { txHash: incomingHash });
 
-  return completeSettlement(payment, incomingHash, merchantAddress, fees, logger);
+  return completeSettlement(payment, incomingHash, merchantAddress, fees, logger, hooks);
 }

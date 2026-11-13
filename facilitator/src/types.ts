@@ -11,7 +11,9 @@ export type {
   PaymentRequirements,
   PaymentPayload,
   ResourceInfo,
+  PaymentRequirementsV1,
 } from '@x402/core/types';
+import type { PaymentPayload, PaymentRequirements, PaymentRequirementsV1 as PaymentRequirementsV1Type, ResourceInfo as ResourceInfoType } from '@x402/core/types';
 
 // EIP-3009 authorization as carried in an exact EVM payload
 export interface EIP3009Authorization {
@@ -43,6 +45,14 @@ export interface NormalizedPayment {
   requirements: NormalizedRequirements;
   authorization: EIP3009Authorization;
   signature: Hex;
+  // v2 only: resource info and extension echoes carried by the client (e.g. `bazaar`)
+  resource?: ResourceInfoType;
+  extensions?: Record<string, unknown>;
+  // The validated wire objects, kept for extension processing that needs the full shape
+  raw: {
+    paymentPayload: PaymentPayload;
+    paymentRequirements: PaymentRequirements | PaymentRequirementsV1Type;
+  };
 }
 
 // Exact EVM payload using the eip3009 asset transfer method
