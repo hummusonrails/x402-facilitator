@@ -279,6 +279,13 @@ facilitator does not hit this path; a third-party declaration under load can.
 most `DISCOVERY_SCHEMA_TIMEOUT_MS` per call. The rate limiter is the only thing bounding the queue today.
 The remedy (separate queues per trust level, or a per-caller budget) is an open design decision.
 
+**Only GET and HEAD HTTP resources are catalogued.** An MCP declaration is rejected with `mcp declarations are not
+catalogued yet`: an MCP tool's terms come back in a tool result, not an HTTP response, so there is no seller copy to
+check the buyer's echo against. A declaration whose `info.input.method` is anything but `GET` or `HEAD` is rejected
+with `only GET and HEAD resources are catalogued yet`, because the facilitator probes the seller with that method and
+the buyer chooses it. Both are refusals rather than `processing`, since no later step would ever index them. MCP, and
+body-type resources, can follow once each has a safe way to obtain the seller's own declaration.
+
 Two consequences of the origin model are deliberate:
 
 **Routes within a registered origin are still the buyer's to choose.** Registration pins the origin, not the path:

@@ -46,6 +46,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+export const REJECTED_MCP_NOT_SUPPORTED = 'mcp declarations are not catalogued yet';
+export const REJECTED_UNSUPPORTED_METHOD = 'only GET and HEAD resources are catalogued yet';
+const CATALOGUED_METHODS = new Set(['GET', 'HEAD']);
+
 /** Longest `description` / `mimeType` we persist and republish on the public catalog. */
 const MAX_DESCRIPTION_LENGTH = 1024;
 const MAX_MIME_TYPE_LENGTH = 128;
@@ -112,9 +116,20 @@ export async function evaluateBazaarDeclaration(payment: NormalizedPayment, logg
 
   const info = declaration.info;
   const input = info.input as Record<string, unknown>;
+  // The catalogue is built from the seller's own 402, and an MCP tool's price comes back in a
+  // tool result rather than an HTTP response, so there is no seller copy to check it against.
+  // Refused outright rather than reported `processing`: no later step would ever index it.
+  if (input.type === 'mcp') {
+    return reject(REJECTED_MCP_NOT_SUPPORTED);
+  }
   if (input.type === 'http' && typeof input.method !== 'string') {
     // The SDK's server extension fills this in at 402 time; a declaration without it cannot be called
     return reject('info.input.method is required for http resources');
+  }
+  // The seller's 402 is fetched with the declared method, and the buyer chooses the
+  // declaration, so only methods that cannot change state on the merchant's side get sent.
+  if (input.type === 'http' && !CATALOGUED_METHODS.has(input.method as string)) {
+    return reject(REJECTED_UNSUPPORTED_METHOD);
   }
   if (info.output !== undefined && (!isPlainObject(info.output) || typeof info.output.type !== 'string')) {
     return reject('info.output.type is required when output is present');

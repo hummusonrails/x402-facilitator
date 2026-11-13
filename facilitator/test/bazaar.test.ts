@@ -1,6 +1,12 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { createLogger } from '../src/logging.js';
-import { encodeExtensionResponses, evaluateBazaarDeclaration } from '../src/bazaar.js';
+import { declareDiscoveryExtension } from '@x402/extensions/bazaar';
+import {
+  encodeExtensionResponses,
+  evaluateBazaarDeclaration,
+  REJECTED_MCP_NOT_SUPPORTED,
+  REJECTED_UNSUPPORTED_METHOD,
+} from '../src/bazaar.js';
 import { shutdownSchemaGuard } from '../src/schemaGuard.js';
 import { LOOPBACK_RESOURCE_URL, normalizedPayment, validBazaarDeclaration } from './fixtures.js';
 
@@ -43,10 +49,32 @@ describe('evaluateBazaarDeclaration', () => {
 
   it('rejects info that does not satisfy its own schema', async () => {
     const declaration = validBazaarDeclaration();
-    (declaration.info as any).input.method = 'POST'; // schema enum is GET/HEAD/DELETE
+    // Narrow the schema's method enum so a method the allowlist accepts still fails it
+    (declaration.schema as any).properties.input.properties.method.enum = ['GET'];
+    (declaration.info as any).input.method = 'HEAD';
     const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
     expect(result).toMatchObject({ declared: true, valid: false });
     expect((result as any).rejectedReason).toMatch(/schema validation/);
+  });
+
+  it('refuses an mcp declaration: there is no seller 402 to catalogue it from', async () => {
+    const declaration = declareDiscoveryExtension({ toolName: 'analyze', inputSchema: { type: 'object', properties: {} } }).bazaar;
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    expect(result).toEqual({ declared: true, valid: false, rejectedReason: REJECTED_MCP_NOT_SUPPORTED });
+  });
+
+  it('refuses a method other than GET or HEAD, since the seller is probed with it', async () => {
+    const declaration = validBazaarDeclaration();
+    (declaration.info as any).input.method = 'DELETE'; // in the SDK's own enum, so only the allowlist stops it
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    expect(result).toEqual({ declared: true, valid: false, rejectedReason: REJECTED_UNSUPPORTED_METHOD });
+  });
+
+  it('accepts a HEAD declaration', async () => {
+    const declaration = validBazaarDeclaration();
+    (declaration.info as any).input.method = 'HEAD';
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    expect(result).toMatchObject({ declared: true, valid: true });
   });
 
   it('rejects an http declaration with no method', async () => {
