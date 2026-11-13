@@ -14,9 +14,11 @@ export type ParseResult =
   | { ok: true; payment: NormalizedPayment }
   | { ok: false; reason: string; message: string; payer?: string; network?: string };
 
-function firstIssue(error: { errors: { path: (string | number)[]; message: string }[] }): string {
-  const issue = error.errors[0];
-  return issue ? `${issue.path.join('.') || '(root)'}: ${issue.message}` : 'invalid';
+// `issues`, not `errors`: Zod 4 (which @x402/core uses from 2.29) dropped ZodError.errors,
+// while Zod 3 has both, so this reads the same on either major
+function firstIssue(error: { issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }> }): string {
+  const issue = error.issues[0];
+  return issue ? `${issue.path.map(String).join('.') || '(root)'}: ${issue.message}` : 'invalid';
 }
 
 /**
