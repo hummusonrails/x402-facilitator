@@ -124,8 +124,11 @@ sequenceDiagram
   Fac->>Chain: transferWithAuthorization(buyer → facilitator)
   Chain-->>Fac: receipt + Transfer event
   Fac->>DB: status = incoming_complete
-  Note over Fac: onIncomingConfirmed hook → verdict<br/>(waits ≤ DISCOVERY_SCHEMA_TIMEOUT_MS) → indexBazaarResource()<br/>origin registered to this merchant?
-  Fac->>DB: UPSERT discovery_resources (resource_url, tool_name)
+  Note over Fac: onIncomingConfirmed hook → verdict on the echo<br/>origin registered to this merchant?
+  Fac->>Seller: GET/HEAD resource.url (no payment, no redirects, body unread)
+  Seller-->>Fac: 402 PAYMENT-REQUIRED (the seller's own declaration)
+  Fac->>DB: check registration FOR SHARE, UPSERT discovery_resources from the seller's copy
+  Note over Fac: the hook waits ≤ DISCOVERY_SCHEMA_TIMEOUT_MS for this;<br/>past that it reports processing and finishes after the response
   Fac->>Chain: transfer(merchant share)
   Fac-->>Seller: 200 success, tx hashes + EXTENSION-RESPONSES {bazaar: success}
   Seller-->>Agent: PAYMENT-RESPONSE header (buyer never sees EXTENSION-RESPONSES)
@@ -141,8 +144,9 @@ sequenceDiagram
    (`processing` or `rejected` with a reason). Payment verification is unaffected by the outcome.
 5. The seller does the work and answers the buyer.
 6. `/settle` starts validating the declaration and, without waiting for it, submits `transferWithAuthorization`.
-   Once the receipt and the expected `Transfer` event are in, the settle hook takes the verdict and only then upserts
-   `discovery_resources`. The header reports `success`. A declaration attached to a payment that never lands is never
+   Once the receipt and the expected `Transfer` event are in, the settle hook takes the verdict, asks the seller for
+   its own 402, and upserts `discovery_resources` from the seller's copy (see "Where a catalog entry comes from"
+   below). The header reports `success`, or `processing` if that did not finish within the hook's budget. A declaration attached to a payment that never lands is never
    indexed, and gets no verdict either (see "Settlement never waits on discovery" below).
 
 ## Hardening the declaration path
@@ -214,15 +218,64 @@ stored, since the SDK sanitizes `serviceName`, `tags` and `iconUrl` but passes t
 through untouched. Only the `bazaar` key of the buyer's `extensions` map is republished,
 not every other extension they happened to attach.
 
+## Where a catalog entry comes from: the seller's own 402
+
+The buyer's echo cannot be catalogued. The seller SDK checks only the echoed `info` against what it advertised
+(`validateExtensions` in `@x402/core`) and forwards the rest of the payload as the buyer sent it, so the echo's
+`schema`, `routeTemplate` and the whole `resource` block (description, icon, MIME type) are the buyer's to write. A
+buyer paying a merchant that legitimately advertises bazaar could keep `info` as advertised and rewrite that
+merchant's listing.
+
+So the echo is validated, because the spec requires it, and then set aside. Once the payment has confirmed, `/settle`
+asks the seller directly:
+
+1. The paid URL (`resource.url` from the payment) must be on an origin registered to the settling merchant. Nothing
+   else is ever requested; an unregistered origin is `rejected` with no request made.
+2. The request uses the declaration's method, which must be `GET` or `HEAD` (any other method is refused when the
+   declaration is evaluated, on `/verify` too), carries no payment, no credentials and no cookies, does not follow
+   redirects, and is bounded by `DISCOVERY_SELLER_TIMEOUT_MS` (default 2000).
+3. Only the status line and headers are read. The body is cancelled unread.
+4. The seller's 402 must carry a `PAYMENT-REQUIRED` header. A timeout, a network error, a redirect, any status other
+   than 402, or a missing or undecodable header is "no verdict": `processing`, nothing indexed, as for a validator
+   timeout.
+5. The decoded 402 must be `x402Version: 2`, declare `extensions.bazaar`, and list an `accepts` entry matching what
+   was settled on scheme, network, asset and payTo. `amount` is deliberately not compared: a seller with dynamic
+   pricing may quote a different amount on an unpaid request. Failing any of these is `rejected` with a fixed reason
+   that never quotes what the seller sent back.
+6. The seller's declaration then goes through exactly the checks the echo did (size, spec, the MCP and method
+   refusals, both URL screens, its schema in the worker), and the entry is built from it: the URL is the seller's
+   `resource.url` origin plus the seller's `routeTemplate`, `accepts` is the seller's matching entry (its current
+   advertised price), and the description, MIME type, service metadata and declaration are the seller's. Nothing in
+   the catalog comes from the echo.
+7. The write checks the registration again, inside its own transaction, against the URL actually stored.
+
+`/verify` never makes this request: it is unauthenticated, has no merchant, and its verdict on a valid declaration
+stays `processing`.
+
+**What the outbound request exposes.** The facilitator makes one request per indexed settlement, only to registered
+origins. Two residual risks remain, both narrow:
+
+- **A registered origin whose DNS points somewhere private.** The resource-URL screen works on names, not resolved
+  addresses, so an origin whose name resolves to a private address would be requested. Registration is an operator
+  decision and the response body is never read, so this reveals no content, but an operator should only register
+  origins they would be happy for the facilitator to call.
+- **Path probing on the merchant's own host.** The origin is checked but the path is the buyer's: the request goes to
+  the payment's `resource.url`. A buyer paying a merchant can therefore make the facilitator `GET` or `HEAD` any path
+  on that merchant's registered origin. The status and headers that come back stay in the facilitator's logs; what
+  leaves is the bazaar status and a fixed `rejectedReason`, sent to the merchant's server in `EXTENSION-RESPONSES`,
+  which the resource server may pass on. Nothing about the probed response is quoted in it. The reach is one
+  request per paid settlement, registered origins only, `GET`/`HEAD` only, no credentials, no redirects, body unread.
+
 ## What the catalog does and does not attest
 
-A catalog row records that **a declaration accompanied a payment that confirmed onchain to the facilitator, settled
-under the API key of the merchant that an operator registered for the resource's origin.** That is all it records.
+A catalog row records that **a payment confirmed onchain to the facilitator, settled under the API key of the
+merchant an operator registered for the resource's origin, and that this origin's own 402 carried the catalogued
+declaration.** That is all it records.
 
-The declaration and `resource.url` arrive in the buyer's `PaymentPayload`, which the buyer signs and can edit, and
-the catalogued URL is built from them: origin + the declaration's `routeTemplate`. On its own that URL proves nothing;
-a buyer could point it at anyone's domain. So the facilitator does not take the URL's word for it. It indexes a
-resource only when the URL's origin is registered to the merchant whose API key settled the payment
+The buyer's `PaymentPayload` carries a declaration and a `resource.url`, both of which the buyer can edit; on their
+own they prove nothing, and a buyer could point them at anyone's domain. So the facilitator takes neither the URL's
+nor the echo's word for it. It asks only a registered origin for its 402, catalogues what that 402 says, and indexes a
+resource only when the catalogued URL's origin is registered to the merchant whose API key settled the payment
 (`discovery_merchant_origins`, migration 007). The registration is the operator's statement that this merchant serves
 that origin. The facilitator still does not prove domain ownership itself.
 
@@ -297,11 +350,7 @@ with `only GET and HEAD resources are catalogued yet`, because the facilitator p
 the buyer chooses it. Both are refusals rather than `processing`, since no later step would ever index them. MCP, and
 body-type resources, can follow once each has a safe way to obtain the seller's own declaration.
 
-Two consequences of the origin model are deliberate:
-
-**Routes within a registered origin are still the buyer's to choose.** Registration pins the origin, not the path:
-a buyer paying a merchant can still catalogue a made-up route on that merchant's own registered origin. The damage
-stays inside that merchant's namespace, under its own name, and `pnpm discovery delete` removes the entry.
+One consequence of the origin model is deliberate:
 
 **One origin cannot front several merchants.** A marketplace serving many merchants behind a single origin cannot be
 represented, since the path is not part of an origin and each origin belongs to exactly one merchant. That is a
@@ -315,6 +364,7 @@ data has violated it is not.
 | Declaration validation, indexing, `EXTENSION-RESPONSES` | `facilitator/src/bazaar.ts` |
 | Worker-isolated, timed-out JSON Schema validation | `facilitator/src/schemaGuard.ts` |
 | Resource URL screening (SSRF) | `facilitator/src/resourceUrl.ts` |
+| Fetching the seller's own 402 and building the entry from it | `facilitator/src/sellerDeclaration.ts` |
 | Catalog table access | `facilitator/src/discoveryStore.ts` |
 | Table definitions | `facilitator/migrations/006_discovery_resources.sql`, `facilitator/migrations/007_discovery_origins.sql` (origin registrations and the cascade trigger) |
 | Post-confirmation hook | `facilitator/src/settle.ts` (`SettleHooks.onIncomingConfirmed`) |

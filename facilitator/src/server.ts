@@ -35,6 +35,7 @@ import {
   type BazaarExtensionResponse,
 } from './bazaar.js';
 import { listDiscoveryResources, type DiscoveryResourceType } from './discoveryStore.js';
+import { resolveSellerDeclaration } from './sellerDeclaration.js';
 import * as Errors from './errors.js';
 import type { SupportedKind, SupportedResponse, RequirementsRequest, PaymentRequired, NormalizedPayment } from './types.js';
 import type { BazaarEvaluation } from './bazaar.js';
@@ -74,8 +75,10 @@ function startBazaarEvaluation(payment: NormalizedPayment, logger: Logger): Prom
 
 /**
  * Everything discovery does with a declaration once the payer's transfer has confirmed:
- * wait for the verdict, then index. Resolves to the status to report. Never rejects: a crash
- * anywhere in here is logged and reported as `processing`.
+ * wait for the verdict on the buyer's echo, then fetch the seller's own 402 and index the
+ * seller's copy (see sellerDeclaration.ts); the echo itself is never stored. Resolves to the
+ * status to report. Never rejects: a crash anywhere in here is logged and reported as
+ * `processing`.
  *
  * The settle hook waits on this for at most one validation budget and reports `processing`
  * if it is not done by then, but the promise is not abandoned: it keeps running after the
@@ -97,7 +100,11 @@ function catalogueDeclaration(
       logger.warn('Bazaar declaration not indexed: database not configured');
       return { status: 'rejected', rejectedReason: 'discovery index unavailable' };
     }
-    const outcome = await indexBazaarResource(bazaar.resource, payment, merchantAddress, logger);
+    const seller = await resolveSellerDeclaration(bazaar.resource, payment, merchantAddress, logger);
+    // A seller that did not answer usefully is no verdict, like a validator timeout
+    if (seller.kind === 'no_verdict') return { status: 'processing' };
+    if (seller.kind === 'rejected') return { status: 'rejected', rejectedReason: seller.rejectedReason };
+    const outcome = await indexBazaarResource(seller.resource, seller.payment, merchantAddress, logger);
     return outcome === 'claimed_by_other'
       ? { status: 'rejected', rejectedReason: REJECTED_CLAIMED_BY_OTHER }
       : outcome === 'origin_not_registered'

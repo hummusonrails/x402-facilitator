@@ -110,13 +110,15 @@ The declaration reaching `/verify` and `/settle` is attacker-controlled on both 
 
 - **Schema validation runs in a worker thread under a hard timeout** (`DISCOVERY_SCHEMA_TIMEOUT_MS`, default 250ms). Ajv compiles a schema `pattern` to a plain `RegExp` with no linear-time guarantee, so a declaration like `{"pattern": "^(a+)+$"}` matched against `"aaaa…b"` backtracks exponentially. On the main thread that blocks the event loop for the whole process. A validation that overruns has its worker killed and the declaration is reported `processing`, not `rejected`: a slow match can mean a hostile regex or simply a busy box, and the facilitator cannot tell which, so it makes no claim about the declaration. Nothing is indexed either way.
 - **Declarations over `DISCOVERY_MAX_DECLARATION_BYTES`** (default 16KB) are refused before any schema work.
+- **The catalog is built from the seller's own 402, not the buyer's echo.** The seller SDK checks only the echoed `info`, so the echo's `schema`, `routeTemplate` and `resource` block are the buyer's to write. After the payment confirms, `/settle` requests the paid URL from the seller (registered origins only, `GET`/`HEAD` only, no payment or credentials, no redirects, `DISCOVERY_SELLER_TIMEOUT_MS`, body unread) and catalogues the declaration, `resource` block and matching `accepts` entry from its `PAYMENT-REQUIRED` header. A seller that does not answer with a usable 402 is reported `processing`; a 402 without a bazaar declaration, or without an `accepts` entry matching what was settled, is `rejected`. `/verify` never makes the request.
 - **Resource URLs are screened** before they enter the catalog: loopback names, IPv4 literals, decimal- and hex-encoded hosts, IPv6 literals, internal-use suffixes and bare hostnames are all refused, as are URLs carrying credentials. A catalogued URL is one that agents call unattended, so the catalog must not be able to point them at `http://169.254.169.254/` or back at a private network. Set `DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS=true` to develop against a seller on localhost. The same screen, including its 2048-character limit, is applied again to the URL that is actually stored (origin + the declaration's `routeTemplate`).
 
-`DISCOVERY_SCHEMA_TIMEOUT_MS` (minimum 1) and `DISCOVERY_MAX_DECLARATION_BYTES` (minimum 1024) are validated at startup; the process refuses to boot on a non-numeric or too-small value.
+`DISCOVERY_SCHEMA_TIMEOUT_MS` (minimum 1), `DISCOVERY_SELLER_TIMEOUT_MS` (minimum 1) and `DISCOVERY_MAX_DECLARATION_BYTES` (minimum 1024) are validated at startup; the process refuses to boot on a non-numeric or too-small value.
 
 #### Known limitations
 - **A declaration no verdict is reached on is never indexed.** If the schema validator is saturated or times out, the header says `processing`, the payment still settles, and the declaration is dropped: nothing persists it and nothing retries it. It is only catalogued if a later settlement carries it again. (A verdict that is merely late is indexed when it lands; a restart before then loses it.)
-- **Routes within a registered origin are still the buyer's to choose.** Registration pins the origin, not the path, so a buyer paying a merchant can catalogue a made-up route on that merchant's own origin. The damage stays in that merchant's namespace, and `pnpm discovery delete` removes it.
+- **Only `GET` and `HEAD` HTTP resources are catalogued.** MCP declarations, and any other method, are rejected until each has a safe way to obtain the seller's own declaration.
+- **One outbound request per indexed settlement.** It goes only to registered origins, but the path is the buyer's, so a buyer can make the facilitator `GET` or `HEAD` any path on the merchant's own registered origin (status and headers stay in our logs; the body is never read). An origin whose DNS resolves to a private address would also be requested, so register only origins you are happy for the facilitator to call.
 - **One origin cannot front several merchants.** A marketplace serving many merchants behind one origin can't be represented, since the path isn't part of an origin. That is deliberate: loosening one-merchant-per-origin later is easy, tightening it is not.
 - **`/verify` and `/settle` share one schema validation queue.** `/verify` is unauthenticated and does not consume the nonce, so a replayed payload with a slow schema can fill the queue and push declarations on real settlements onto the deferred path above. Honest `/verify` calls meanwhile wait out their deadline and report `processing`; a saturated validator adds at most `DISCOVERY_SCHEMA_TIMEOUT_MS` to `/verify` and to the settle hook.
 
@@ -341,6 +343,8 @@ DISCOVERY_SCHEMA_TIMEOUT_MS=250
 DISCOVERY_MAX_DECLARATION_BYTES=16384
 # Allow loopback / private resource URLs into the catalog. Local development only (default: false)
 DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS=false
+# Timeout for the request that fetches the seller's own 402 on settle (default: 2000)
+DISCOVERY_SELLER_TIMEOUT_MS=2000
 
 # Optional: How long to wait for a settlement receipt before returning settlement_pending (default: 180000)
 SETTLEMENT_CONFIRMATION_TIMEOUT_MS=180000
@@ -407,6 +411,7 @@ facilitator/
 │   ├── bazaar.ts        # Bazaar extension: declaration validation, indexing, EXTENSION-RESPONSES
 │   ├── schemaGuard.ts   # Runs declaration JSON Schema validation in a worker under a timeout
 │   ├── resourceUrl.ts   # SSRF screening for declared resource URLs
+│   ├── sellerDeclaration.ts # Fetches the seller's own 402 that catalog entries are built from
 │   ├── discoveryStore.ts # discovery_resources table access and origin registration lookups
 │   ├── recovery.ts      # Retries incomplete merchant forwards
 │   ├── logging.ts       # Structured logging utilities

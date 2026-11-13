@@ -137,6 +137,9 @@ export const DISCOVERY_MAX_DECLARATION_BYTES = parseInt(process.env.DISCOVERY_MA
 // Resource URLs are catalogued for agents to call, so private and loopback hosts are
 // refused. Set this for local development against a seller on localhost.
 export const DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS = process.env.DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS === 'true';
+// The catalogue is built from the seller's own 402, fetched once per indexed settlement.
+// This bounds that request; a seller that does not answer in time is reported `processing`.
+export const DISCOVERY_SELLER_TIMEOUT_MS = parseInt(process.env.DISCOVERY_SELLER_TIMEOUT_MS || '2000', 10);
 
 // Smallest byte bound that still admits a real declaration; anything lower is a typo
 const MIN_DISCOVERY_MAX_DECLARATION_BYTES = 1024;
@@ -146,6 +149,12 @@ const MIN_DISCOVERY_MAX_DECLARATION_BYTES = 1024;
 if (!Number.isFinite(DISCOVERY_SCHEMA_TIMEOUT_MS) || DISCOVERY_SCHEMA_TIMEOUT_MS < 1) {
   throw new Error(
     `DISCOVERY_SCHEMA_TIMEOUT_MS must be an integer of at least 1ms, got ${process.env.DISCOVERY_SCHEMA_TIMEOUT_MS}`
+  );
+}
+
+if (!Number.isFinite(DISCOVERY_SELLER_TIMEOUT_MS) || DISCOVERY_SELLER_TIMEOUT_MS < 1) {
+  throw new Error(
+    `DISCOVERY_SELLER_TIMEOUT_MS must be an integer of at least 1ms, got ${process.env.DISCOVERY_SELLER_TIMEOUT_MS}`
   );
 }
 

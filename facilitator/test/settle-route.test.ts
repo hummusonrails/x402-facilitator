@@ -39,6 +39,14 @@ vi.mock('../src/bazaar.js', async (importOriginal) => ({
   indexBazaarResource: (...args: unknown[]) => indexBazaarResource(...args),
 }));
 
+// The seller's 402 is fetched in sellerDeclaration.ts (covered in seller-declaration.test.ts);
+// here it resolves to the seller's copy unless a test says otherwise.
+const SELLER_RESOURCE = { resourceUrl: 'https://api.example.com/analyze', description: "the seller's own" };
+const resolveSellerDeclaration = vi.fn();
+vi.mock('../src/sellerDeclaration.js', () => ({
+  resolveSellerDeclaration: (...args: unknown[]) => resolveSellerDeclaration(...args),
+}));
+
 const VALID = { declared: true, valid: true, resource: { resourceUrl: 'https://api.example.com/analyze' } };
 const SUCCESS = { success: true, payer: PAYER, transaction: '0x01', network: 'eip155:421614' };
 
@@ -79,6 +87,12 @@ beforeEach(() => {
   evaluateBazaarDeclaration.mockReset();
   indexBazaarResource.mockReset();
   indexBazaarResource.mockResolvedValue('indexed');
+  resolveSellerDeclaration.mockReset();
+  resolveSellerDeclaration.mockImplementation(async (_echo: unknown, payment: unknown) => ({
+    kind: 'resolved',
+    resource: SELLER_RESOURCE,
+    payment,
+  }));
 });
 
 async function settle(body: unknown) {
@@ -122,6 +136,36 @@ describe('POST /settle with a bazaar declaration', () => {
     const { status, header } = await settle(facilitatorRequest(validBazaarDeclaration()));
     expect(status).toBe(200);
     expect(header).toEqual({ bazaar: { status: 'rejected', rejectedReason: 'input.type must be "http" or "mcp"' } });
+    expect(indexBazaarResource).not.toHaveBeenCalled();
+  });
+
+  it("indexes the seller's copy, not the buyer's echo", async () => {
+    evaluateBazaarDeclaration.mockResolvedValue(VALID);
+    settlePayment.mockImplementation(confirmingSettle);
+
+    const { header } = await settle(facilitatorRequest(validBazaarDeclaration()));
+    expect(header).toEqual({ bazaar: { status: 'success' } });
+    expect(resolveSellerDeclaration).toHaveBeenCalledWith(VALID.resource, expect.anything(), MERCHANT, expect.anything());
+    expect(indexBazaarResource.mock.calls[0][0]).toBe(SELLER_RESOURCE);
+  });
+
+  it("reports the seller's rejection and indexes nothing", async () => {
+    evaluateBazaarDeclaration.mockResolvedValue(VALID);
+    resolveSellerDeclaration.mockResolvedValue({ kind: 'rejected', rejectedReason: "seller's 402 declares no bazaar extension" });
+    settlePayment.mockImplementation(confirmingSettle);
+
+    const { header } = await settle(facilitatorRequest(validBazaarDeclaration()));
+    expect(header).toEqual({ bazaar: { status: 'rejected', rejectedReason: "seller's 402 declares no bazaar extension" } });
+    expect(indexBazaarResource).not.toHaveBeenCalled();
+  });
+
+  it('reports processing when the seller gave no usable 402, and indexes nothing', async () => {
+    evaluateBazaarDeclaration.mockResolvedValue(VALID);
+    resolveSellerDeclaration.mockResolvedValue({ kind: 'no_verdict' });
+    settlePayment.mockImplementation(confirmingSettle);
+
+    const { header } = await settle(facilitatorRequest(validBazaarDeclaration()));
+    expect(header).toEqual({ bazaar: { status: 'processing' } });
     expect(indexBazaarResource).not.toHaveBeenCalled();
   });
 
