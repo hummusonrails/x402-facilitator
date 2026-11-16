@@ -125,5 +125,47 @@ if (GAS_FEE_USDC > MAX_GAS_FEE_USDC) {
   throw new Error(`GAS_FEE_USDC (${GAS_FEE_USDC}) exceeds MAX_GAS_FEE_USDC (${MAX_GAS_FEE_USDC})`);
 }
 
+// Bazaar discovery is opt in. Unset, the facilitator behaves exactly as it did before the
+// extension existed: nothing is advertised, evaluated, indexed or served.
+export const DISCOVERY_ENABLED = process.env.DISCOVERY_ENABLED === 'true';
+
+// The declaration in a payment payload is attacker-controlled, so the
+// JSON Schema step runs in a worker under a hard timeout and oversized declarations are
+// refused before they get there.
+export const DISCOVERY_SCHEMA_TIMEOUT_MS = parseInt(process.env.DISCOVERY_SCHEMA_TIMEOUT_MS || '250', 10);
+export const DISCOVERY_MAX_DECLARATION_BYTES = parseInt(process.env.DISCOVERY_MAX_DECLARATION_BYTES || '16384', 10);
+// Resource URLs are catalogued for agents to call, so private and loopback hosts are
+// refused. Set this for local development against a seller on localhost.
+export const DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS = process.env.DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS === 'true';
+// The catalogue is built from the seller's own 402, fetched once per indexed settlement.
+// This bounds that request; a seller that does not answer in time is reported `processing`.
+export const DISCOVERY_SELLER_TIMEOUT_MS = parseInt(process.env.DISCOVERY_SELLER_TIMEOUT_MS || '2000', 10);
+
+// Smallest byte bound that still admits a real declaration; anything lower is a typo
+const MIN_DISCOVERY_MAX_DECLARATION_BYTES = 1024;
+
+// Number.isFinite, not a bare comparison: a non-numeric value parses to NaN, and every
+// comparison against NaN is false, so it would pass a `< 1` guard and then disable the check
+if (!Number.isFinite(DISCOVERY_SCHEMA_TIMEOUT_MS) || DISCOVERY_SCHEMA_TIMEOUT_MS < 1) {
+  throw new Error(
+    `DISCOVERY_SCHEMA_TIMEOUT_MS must be an integer of at least 1ms, got ${process.env.DISCOVERY_SCHEMA_TIMEOUT_MS}`
+  );
+}
+
+if (!Number.isFinite(DISCOVERY_SELLER_TIMEOUT_MS) || DISCOVERY_SELLER_TIMEOUT_MS < 1) {
+  throw new Error(
+    `DISCOVERY_SELLER_TIMEOUT_MS must be an integer of at least 1ms, got ${process.env.DISCOVERY_SELLER_TIMEOUT_MS}`
+  );
+}
+
+if (
+  !Number.isFinite(DISCOVERY_MAX_DECLARATION_BYTES) ||
+  DISCOVERY_MAX_DECLARATION_BYTES < MIN_DISCOVERY_MAX_DECLARATION_BYTES
+) {
+  throw new Error(
+    `DISCOVERY_MAX_DECLARATION_BYTES must be an integer of at least ${MIN_DISCOVERY_MAX_DECLARATION_BYTES}, got ${process.env.DISCOVERY_MAX_DECLARATION_BYTES}`
+  );
+}
+
 
 export const allNetworkConfigs = networkConfigs;
