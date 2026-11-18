@@ -3,7 +3,9 @@ import { config, SETTLEMENT_CONFIRMATION_TIMEOUT_MS } from './config.js';
 import { publicClient, walletClient, facilitatorAccount, USDC_ABI, splitEcdsaSignature } from './clients.js';
 import { verifyPayment } from './verify.js';
 import { computeFeeSplit, type FeeSplit } from './fees.js';
-import { createIfAbsent, getPayment, setStatus, logPaymentEvent } from './nonceStore.js';
+import { createIfAbsent, getPayment, getIdempotencyBinding, setStatus, logPaymentEvent } from './nonceStore.js';
+import { chargeFingerprint, type IdempotencyScope } from './idempotency.js';
+import { serializeSend } from './sendQueue.js';
 import { isDatabaseConfigured } from './db.js';
 import { getMerchantByAddress } from './merchantStore.js';
 import type { NormalizedPayment, SettleResponse } from './types.js';
@@ -27,6 +29,9 @@ export interface SettleHooks {
 // In-memory fallbacks when no database is configured (not safe across restarts or replicas)
 const claimedNonces = new Set<string>();
 const pendingIncoming = new Map<string, { hash: Hex; merchantAddress: string; totalAmount: bigint }>();
+// Idempotency-Key bindings by merchant and key; `response` is unset while the bound attempt is in flight
+const memoryKeys = new Map<string, { fingerprint: string; nonce: string; response?: SettleResponse }>();
+const memoryKeyId = (merchantAddress: string, key: string) => `${merchantAddress.toLowerCase()}:${key}`;
 
 function failure(payer: string, errorReason: string, errorMessage?: string, transaction = ''): SettleResponse {
   return {
@@ -51,23 +56,23 @@ async function submitIncomingTransfer(payment: NormalizedPayment): Promise<Hex> 
   const base = [auth.from, facilitatorAccount.address, auth.value, auth.validAfter, auth.validBefore, auth.nonce] as const;
 
   if (vrs) {
-    return walletClient.writeContract({
+    return serializeSend(() => walletClient.writeContract({
       address: config.usdcAddress as Address,
       abi: USDC_ABI,
       functionName: 'transferWithAuthorization',
       account: facilitatorAccount,
       chain: config.chain,
       args: [...base, vrs.v, vrs.r, vrs.s],
-    });
+    }));
   }
-  return walletClient.writeContract({
+  return serializeSend(() => walletClient.writeContract({
     address: config.usdcAddress as Address,
     abi: USDC_ABI,
     functionName: 'transferWithAuthorization',
     account: facilitatorAccount,
     chain: config.chain,
     args: [...base, signature],
-  });
+  }));
 }
 
 /**
@@ -138,14 +143,14 @@ async function completeSettlement(
   // if it fails the recovery worker retries it from the incoming_complete state.
   let forward: { status: 'complete' | 'pending'; transaction?: Hex } = { status: 'pending' };
   try {
-    const outgoingHash = await walletClient.writeContract({
+    const outgoingHash = await serializeSend(() => walletClient.writeContract({
       address: config.usdcAddress as Address,
       abi: USDC_ABI,
       functionName: 'transfer',
       account: facilitatorAccount,
       chain: config.chain,
       args: [merchantAddress, fees.merchantAmount],
-    });
+    }));
     forward = { status: 'pending', transaction: outgoingHash };
     await recordStatus(nonce, 'outgoing_submitted', { outgoingTxHash: outgoingHash }, { txHash: outgoingHash });
 
@@ -168,6 +173,16 @@ async function completeSettlement(
 
   logger.info('Settlement complete', { incomingHash, forward });
 
+  return successResponse(payer, incomingHash, merchantAddress, fees, forward);
+}
+
+function successResponse(
+  payer: string,
+  incomingHash: Hex,
+  merchantAddress: Address,
+  fees: FeeSplit,
+  forward: { status: 'complete' | 'pending'; transaction?: Hex }
+): SettleResponse {
   return {
     success: true,
     payer,
@@ -187,16 +202,93 @@ async function completeSettlement(
   };
 }
 
+/** Marks a response that resolved to an earlier payment under the same Idempotency-Key. */
+function asReplay(response: SettleResponse): SettleResponse {
+  return { ...response, extra: { ...response.extra, idempotentReplay: true } };
+}
+
+// The same authorization, renonced to the payment the key is bound to. The fingerprint
+// guarantees payer and value match, which is all the confirmation check reads.
+function boundPayment(payment: NormalizedPayment, boundNonce: string): NormalizedPayment {
+  return { ...payment, authorization: { ...payment.authorization, nonce: boundNonce as Hex } };
+}
+
+const inFlightUnderKey = (payer: string) =>
+  failure(payer, Errors.ErrSettlementPending, 'An earlier attempt under this Idempotency-Key is still settling');
+
+/**
+ * Resolves a settle whose Idempotency-Key is already bound to a different nonce. Returns
+ * undefined when this attempt should settle normally: the key is unbound, bound to this
+ * same nonce (nonce reconciliation covers that), or bound to a payment that failed.
+ *
+ * The new authorization is never broadcast on a replay. It stays unused onchain and lapses
+ * at its validBefore, so the buyer is charged once.
+ */
+async function resolveIdempotentSettle(
+  payment: NormalizedPayment,
+  merchantAddress: Address,
+  scope: IdempotencyScope,
+  logger: Logger,
+  hooks?: SettleHooks
+): Promise<SettleResponse | undefined> {
+  const payer = payment.authorization.from;
+  const nonce = payment.authorization.nonce;
+
+  if (!useDatabase) {
+    const entry = memoryKeys.get(memoryKeyId(merchantAddress, scope.key));
+    if (!entry) return undefined;
+    if (entry.fingerprint !== scope.fingerprint) return failure(payer, Errors.ErrIdempotencyKeyReused);
+    if (entry.nonce === nonce) return undefined;
+    if (entry.response?.success) return asReplay(entry.response);
+    const pending = pendingIncoming.get(entry.nonce);
+    if (pending) {
+      const fees = computeFeeSplit(pending.totalAmount);
+      if (!fees) return failure(payer, Errors.ErrUnexpectedSettleError);
+      logger.info('Reconciling pending settlement bound to the idempotency key', { hash: pending.hash, boundNonce: entry.nonce });
+      const result = await completeSettlement(boundPayment(payment, entry.nonce), pending.hash, merchantAddress, fees, logger, hooks);
+      entry.response = result;
+      return asReplay(result);
+    }
+    if (!entry.response) return inFlightUnderKey(payer);
+    return undefined;
+  }
+
+  const binding = await getIdempotencyBinding(merchantAddress, scope.key);
+  if (!binding) return undefined;
+  if (binding.fingerprint !== scope.fingerprint) return failure(payer, Errors.ErrIdempotencyKeyReused);
+  if (binding.nonce === nonce) return undefined;
+
+  const record = await getPayment(binding.nonce);
+  if (!record || record.status === 'failed') return undefined;
+  if (record.status === 'pending' || !record.incomingTxHash) return inFlightUnderKey(payer);
+
+  const fees = computeFeeSplit(BigInt(record.totalAmount));
+  if (!fees) return failure(payer, Errors.ErrUnexpectedSettleError);
+  const incomingHash = record.incomingTxHash as Hex;
+
+  if (record.status === 'incoming_submitted') {
+    logger.info('Reconciling pending settlement bound to the idempotency key', { hash: incomingHash, boundNonce: binding.nonce });
+    return asReplay(await completeSettlement(boundPayment(payment, binding.nonce), incomingHash, merchantAddress, fees, logger, hooks));
+  }
+
+  logger.info('Idempotency key resolved to an earlier settlement', { hash: incomingHash, boundNonce: binding.nonce });
+  const forward = record.status === 'complete'
+    ? { status: 'complete' as const, ...(record.outgoingTxHash && { transaction: record.outgoingTxHash as Hex }) }
+    : { status: 'pending' as const, ...(record.outgoingTxHash && { transaction: record.outgoingTxHash as Hex }) };
+  return asReplay(successResponse(payer, incomingHash, merchantAddress, fees, forward));
+}
+
 export async function settlePayment(
   payment: NormalizedPayment,
   merchantAddress: Address,
   logger: Logger,
-  hooks?: SettleHooks
+  hooks?: SettleHooks,
+  idempotencyKey?: string
 ): Promise<SettleResponse> {
   const payer = payment.authorization.from;
   const nonce = payment.authorization.nonce;
 
-  logger.info('Starting payment settlement');
+  logger.info('Starting payment settlement', { idempotencyKey });
 
   const merchant = await getMerchantByAddress(merchantAddress);
   if (!merchant) {
@@ -204,6 +296,16 @@ export async function settlePayment(
   }
   if (!merchant.enabled) {
     return failure(payer, Errors.ErrMerchantDisabled);
+  }
+
+  // A key already bound to another authorization for the same charge resolves to that
+  // payment, so a buyer who re-signed after a timeout is not charged a second time.
+  const scope: IdempotencyScope | undefined = idempotencyKey
+    ? { key: idempotencyKey, fingerprint: chargeFingerprint(payment) }
+    : undefined;
+  if (scope) {
+    const resolved = await resolveIdempotentSettle(payment, merchantAddress, scope, logger, hooks);
+    if (resolved) return resolved;
   }
 
   // Retry of a settle that previously returned settlement_pending: reconcile
@@ -226,7 +328,7 @@ export async function settlePayment(
       return failure(payer, Errors.ErrNonceAlreadyUsed);
     }
     logger.info('Reconciling pending settlement', { hash: pending.hash });
-    return completeSettlement(payment, pending.hash, merchantAddress, fees, logger, hooks);
+    return rememberOutcome(merchantAddress, scope, nonce, await completeSettlement(payment, pending.hash, merchantAddress, fees, logger, hooks));
   }
 
   // Re-verify immediately before settling, including simulation so the
@@ -253,9 +355,17 @@ export async function settlePayment(
         totalAmount: fees.totalAmount,
         merchantAmount: fees.merchantAmount,
         feeAmount: fees.facilitatorFee,
+        idempotency: scope,
       });
       if (claim === 'exists') {
         return failure(payer, Errors.ErrNonceAlreadyUsed);
+      }
+      if (claim === 'key_conflict') {
+        return failure(payer, Errors.ErrIdempotencyKeyReused);
+      }
+      if (claim === 'key_bound') {
+        // Another attempt under this key claimed it while this one was verifying
+        return (await resolveIdempotentSettle(payment, merchantAddress, scope!, logger, hooks)) ?? inFlightUnderKey(payer);
       }
     } catch (error: any) {
       logger.error('Database error claiming nonce', { error: error.message });
@@ -265,9 +375,43 @@ export async function settlePayment(
     if (claimedNonces.has(nonce)) {
       return failure(payer, Errors.ErrNonceAlreadyUsed);
     }
+    // Checked again after verification, with no await between the check and the bind, since
+    // another attempt may have bound the key while this one was verifying
+    if (scope) {
+      const id = memoryKeyId(merchantAddress, scope.key);
+      const entry = memoryKeys.get(id);
+      const releasable = !entry || (entry.fingerprint === scope.fingerprint &&
+        (entry.nonce === nonce || (entry.response && !entry.response.success && !pendingIncoming.has(entry.nonce))));
+      if (!releasable) {
+        return (await resolveIdempotentSettle(payment, merchantAddress, scope, logger, hooks)) ?? inFlightUnderKey(payer);
+      }
+      memoryKeys.set(id, { fingerprint: scope.fingerprint, nonce });
+    }
     claimedNonces.add(nonce);
     logger.warn('Using in-memory nonce tracking, not production safe');
   }
+
+  return rememberOutcome(merchantAddress, scope, nonce, await broadcastAndComplete(payment, merchantAddress, fees, logger, hooks));
+}
+
+/** Without a database, records the outcome on the key's in-memory binding so replays can resolve to it. */
+function rememberOutcome(merchantAddress: Address, scope: IdempotencyScope | undefined, nonce: string, result: SettleResponse): SettleResponse {
+  if (!useDatabase && scope) {
+    const entry = memoryKeys.get(memoryKeyId(merchantAddress, scope.key));
+    if (entry && entry.nonce === nonce) entry.response = result;
+  }
+  return result;
+}
+
+async function broadcastAndComplete(
+  payment: NormalizedPayment,
+  merchantAddress: Address,
+  fees: FeeSplit,
+  logger: Logger,
+  hooks?: SettleHooks
+): Promise<SettleResponse> {
+  const payer = payment.authorization.from;
+  const nonce = payment.authorization.nonce;
 
   logger.info('Submitting transferWithAuthorization', {
     from: payer,

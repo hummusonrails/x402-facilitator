@@ -1,6 +1,7 @@
 import { withTx, pool } from './db.js';
 import { createHash } from 'crypto';
 import { createLogger } from './logging.js';
+import type { IdempotencyBinding, IdempotencyScope } from './idempotency.js';
 
 const logger = createLogger({ context: 'nonceStore' });
 
@@ -32,7 +33,15 @@ export interface PaymentRecord {
 }
 
 function nonceLockKey(nonce: string): bigint {
-  const hash = createHash('sha256').update(nonce).digest();
+  return advisoryLockKey(nonce);
+}
+
+function idempotencyLockKey(merchantAddress: string, key: string): bigint {
+  return advisoryLockKey(`idempotency:${merchantAddress.toLowerCase()}:${key}`);
+}
+
+function advisoryLockKey(value: string): bigint {
+  const hash = createHash('sha256').update(value).digest();
   // PostgreSQL advisory locks use int8 (64-bit signed integer)
   // Take first 8 bytes and convert to bigint, ensuring it fits in signed 64-bit range
   const rawValue = BigInt('0x' + hash.subarray(0, 8).toString('hex'));
@@ -50,23 +59,48 @@ export async function createIfAbsent(args: {
   totalAmount: bigint;
   merchantAmount: bigint;
   feeAmount: bigint;
-}): Promise<'created' | 'exists'> {
+  idempotency?: IdempotencyScope;
+}): Promise<'created' | 'exists' | 'key_conflict' | 'key_bound'> {
   return withTx(async (client) => {
     const lockKey = nonceLockKey(args.nonce);
-    
+
     await client.query('SELECT pg_advisory_xact_lock($1)', [lockKey.toString()]);
-    
+
     // Check if nonce already exists
     const existingRow = await client.query(
       'SELECT nonce FROM payments WHERE nonce = $1',
       [args.nonce]
     );
-    
+
     if (existingRow.rowCount && existingRow.rowCount > 0) {
       logger.warn('Nonce already exists', { nonce: args.nonce });
       return 'exists';
     }
-    
+
+    // Under the key's lock, so two attempts with different nonces cannot both bind it.
+    // A key bound to a failed payment may be rebound: that charge never landed.
+    if (args.idempotency) {
+      const keyLock = idempotencyLockKey(args.merchantAddress, args.idempotency.key);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [keyLock.toString()]);
+      const bound = await client.query(
+        `SELECT i.fingerprint, i.nonce, p.status
+           FROM settle_idempotency i JOIN payments p ON p.nonce = i.nonce
+          WHERE i.merchant_address = decode(substr($1, 3), 'hex') AND i.idempotency_key = $2`,
+        [args.merchantAddress, args.idempotency.key]
+      );
+      if (bound.rows.length > 0) {
+        const row = bound.rows[0];
+        if (row.fingerprint !== args.idempotency.fingerprint) {
+          logger.warn('Idempotency key reused for a different charge', { nonce: args.nonce });
+          return 'key_conflict';
+        }
+        if (row.status !== 'failed') {
+          logger.info('Idempotency key already bound to a live payment', { nonce: args.nonce, boundNonce: row.nonce });
+          return 'key_bound';
+        }
+      }
+    }
+
     await client.query(
       `INSERT INTO payments 
        (nonce, user_address, merchant_address, token_address, network, total_amount, merchant_amount, fee_amount, status)
@@ -83,7 +117,16 @@ export async function createIfAbsent(args: {
         args.feeAmount.toString(),
       ]
     );
-    
+
+    if (args.idempotency) {
+      await client.query(
+        `INSERT INTO settle_idempotency (merchant_address, idempotency_key, fingerprint, nonce)
+         VALUES (decode(substr($1, 3), 'hex'), $2, $3, $4)
+         ON CONFLICT (merchant_address, idempotency_key) DO UPDATE SET nonce = EXCLUDED.nonce`,
+        [args.merchantAddress, args.idempotency.key, args.idempotency.fingerprint, args.nonce]
+      );
+    }
+
     logger.info('Payment record created', { 
       nonce: args.nonce,
       merchant: args.merchantAddress,
@@ -185,6 +228,15 @@ export async function getPayment(nonce: string): Promise<PaymentRecord | null> {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+export async function getIdempotencyBinding(merchantAddress: string, key: string): Promise<IdempotencyBinding | null> {
+  const { rows } = await pool.query(
+    `SELECT fingerprint, nonce FROM settle_idempotency
+      WHERE merchant_address = decode(substr($1, 3), 'hex') AND idempotency_key = $2`,
+    [merchantAddress, key]
+  );
+  return rows.length > 0 ? { fingerprint: rows[0].fingerprint, nonce: rows[0].nonce } : null;
 }
 
 export async function getIncompletePayments(): Promise<PaymentRecord[]> {

@@ -5,6 +5,7 @@ import { config } from './config.js';
 import { createWalletClient, createPublicClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { FACILITATOR_PRIVATE_KEY } from './config.js';
+import { serializeSend } from './sendQueue.js';
 
 const logger = createLogger({ context: 'recovery' });
 
@@ -54,7 +55,7 @@ async function retryOutgoingTransfer(
         merchantAmount: merchantAmount.toString(),
       });
 
-      const outgoingHash = await walletClient.writeContract({
+      const outgoingHash = await serializeSend(() => walletClient.writeContract({
         address: payment.tokenAddress as Address,
         abi: transferAbi,
         functionName: 'transfer',
@@ -64,7 +65,7 @@ async function retryOutgoingTransfer(
           payment.merchantAddress as Address,
           merchantAmount,
         ],
-      });
+      }));
 
       logger.info('Outgoing transfer submitted', {
         nonce: payment.nonce,

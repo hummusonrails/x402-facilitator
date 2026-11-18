@@ -221,13 +221,26 @@ Verifies again, then settles onchain and forwards the merchant share.
 
 `settlement_pending` is non-terminal: the transaction was broadcast but not confirmed within `SETTLEMENT_CONFIRMATION_TIMEOUT_MS`, and `transaction` holds its hash. Retrying the same payload with the same merchant key reconciles against that transaction.
 
+#### `Idempotency-Key`
+
+Nonce checks only catch the same authorization arriving twice. When a buyer times out and signs a fresh authorization for the same purchase, the new nonce is valid on its own and would settle a second time. To prevent that, send an `Idempotency-Key` header (1 to 255 visible ASCII characters) that stays the same across every attempt at one purchase, for example an order ID or a key the buyer's client sends you.
+
+The key is scoped to your merchant API key and bound to the charge: payer, amount, asset, `payTo`, network and resource URL, but not the nonce or signature. A later `/settle` with the same key and a different authorization for the same charge:
+
+- returns the original settlement (`success: true`, the original `transaction`) if it landed, with `extra.idempotentReplay: true` and an `Idempotent-Replayed: true` response header. The new authorization is never broadcast and lapses at its `validBefore`.
+- reconciles against the original broadcast if it is still pending.
+- returns `settlement_pending` with no `transaction` if the original attempt has not broadcast yet.
+- settles the new authorization if the original failed, and binds the key to it.
+
+Reusing a key for a different charge returns `idempotency_key_reused`; a malformed key returns 400 with `invalid_idempotency_key`. Without the header, `/settle` behaves as before and only nonce-level replay protection applies. Keys need migration 008 (`pnpm migrate migrations/008_settle_idempotency.sql` on an existing database).
+
 ### Error reasons
 
 Protocol codes from the spec: `insufficient_funds`, `invalid_network`, `invalid_payload`, `invalid_payment_requirements`, `invalid_x402_version`, `invalid_transaction_state`, `unexpected_verify_error`, `unexpected_settle_error`, `settlement_pending`.
 
 Exact EVM codes, matching the reference facilitator: `invalid_exact_evm_scheme`, `invalid_exact_evm_network_mismatch`, `invalid_exact_evm_missing_eip712_domain`, `invalid_exact_evm_recipient_mismatch`, `invalid_exact_evm_signature`, `invalid_exact_evm_payload_authorization_valid_before`, `invalid_exact_evm_payload_authorization_valid_after`, `invalid_exact_evm_payload_authorization_value_mismatch`, `invalid_exact_evm_token_name_mismatch`, `invalid_exact_evm_token_version_mismatch`, `invalid_exact_evm_nonce_already_used`, `invalid_exact_evm_transaction_simulation_failed`, `invalid_exact_evm_transaction_failed`, `invalid_exact_evm_transfer_event_mismatch`, `unsupported_payload_type`.
 
-Facilitator specific: `unsupported_asset`, `amount_below_facilitator_fee`, `amount_above_facilitator_limit`, `merchant_not_registered`, `merchant_disabled`.
+Facilitator specific: `unsupported_asset`, `amount_below_facilitator_fee`, `amount_above_facilitator_limit`, `merchant_not_registered`, `merchant_disabled`, `invalid_idempotency_key`, `idempotency_key_reused`.
 
 ### `GET /requirements` / `POST /requirements`
 Helper that builds a `PaymentRequired` object for this facilitator. Returns 200 with the object in the body and base64 encoded in the `PAYMENT-REQUIRED` header. Pass `version=1` (query) or `"x402Version": 1` (body) for the legacy v1 shape.

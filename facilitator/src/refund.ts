@@ -4,6 +4,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { config, FACILITATOR_PRIVATE_KEY } from './config.js';
 import { getPayment, setStatus, logPaymentEvent } from './nonceStore.js';
 import { createLogger } from './logging.js';
+import { serializeSend } from './sendQueue.js';
 
 const logger = createLogger({ context: 'refund' });
 
@@ -96,7 +97,7 @@ export async function executeRefund(
       token: payment.tokenAddress,
     });
 
-    const refundHash = await walletClient.writeContract({
+    const refundHash = await serializeSend(() => walletClient.writeContract({
       address: payment.tokenAddress as Address,
       abi: TRANSFER_ABI,
       functionName: 'transfer',
@@ -106,7 +107,7 @@ export async function executeRefund(
         payment.userAddress as Address,
         BigInt(payment.totalAmount),
       ],
-    });
+    }));
 
     logger.info('Refund transaction submitted', { 
       nonce, 

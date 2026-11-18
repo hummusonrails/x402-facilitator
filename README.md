@@ -70,6 +70,9 @@ psql $DATABASE_URL -f migrations/002_merchants.sql
 psql $DATABASE_URL -f migrations/003_merchant_approval.sql
 psql $DATABASE_URL -f migrations/004_merchant_contact_info.sql
 psql $DATABASE_URL -f migrations/005_add_fee_columns.sql
+psql $DATABASE_URL -f migrations/006_discovery_resources.sql
+psql $DATABASE_URL -f migrations/007_discovery_origins.sql
+psql $DATABASE_URL -f migrations/008_settle_idempotency.sql
 ```
 
 ### Configuration
@@ -379,6 +382,8 @@ Failure:
 
 Some failures also include an `errorMessage`. `errorReason: "settlement_pending"` is not terminal: the transaction was broadcast but not confirmed within `SETTLEMENT_CONFIRMATION_TIMEOUT_MS`, and `transaction` holds its hash. Retrying the identical payload with the same merchant key reconciles against that transaction instead of broadcasting a new one.
 
+Optional header `Idempotency-Key: <order id>` (1 to 255 visible ASCII characters) ties retries of one purchase together even when the buyer signs a fresh authorization with a new nonce. The key is scoped to the merchant and bound to the charge (payer, amount, asset, `payTo`, network, resource URL). A retry under the same key returns the original settlement with `extra.idempotentReplay: true` and an `Idempotent-Replayed: true` header instead of charging again; the new authorization is never broadcast. If the original payment failed, the new one settles and takes over the key. See [facilitator/README.md](facilitator/README.md#idempotency-key) for every case.
+
 Authentication failures return 401 (missing or invalid key) or 403 (merchant disabled or pending approval) with `{ "error": "..." }`.
 
 ### Error Codes
@@ -410,6 +415,8 @@ Facilitator-specific codes:
 | `amount_below_facilitator_fee` | Amount does not cover `GAS_FEE_USDC` |
 | `amount_above_facilitator_limit` | Amount exceeds `MAX_SETTLEMENT_AMOUNT` |
 | `merchant_not_registered`, `merchant_disabled` | Merchant for this API key cannot receive payments |
+| `invalid_idempotency_key` | `Idempotency-Key` header is malformed (400) |
+| `idempotency_key_reused` | `Idempotency-Key` was already used for a different charge |
 
 ### Admin Endpoints
 
@@ -554,6 +561,10 @@ The recovery worker runs every 5 minutes (configurable) and:
 4. Retries with exponential backoff (2s, 4s, 8s)
 5. Marks as `failed` after max retries
 6. Logs all recovery attempts for audit
+
+### Transaction Nonces
+
+Settlement, merchant forwards, recovery and refunds all send from the facilitator account. Each broadcast takes its transaction nonce from the RPC's pending count, and broadcasts run one at a time inside the process, so two sends never read the same count. Receipts are awaited outside that queue, so settlements still confirm in parallel. This holds for one instance; running several replicas on the same key needs a shared nonce allocator.
 
 ## Security
 
