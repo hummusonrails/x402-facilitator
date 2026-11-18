@@ -40,3 +40,5 @@ export const ErrAmountBelowFee = 'amount_below_facilitator_fee';
 export const ErrAmountAboveLimit = 'amount_above_facilitator_limit';
 export const ErrMerchantNotRegistered = 'merchant_not_registered';
 export const ErrMerchantDisabled = 'merchant_disabled';
+export const ErrInvalidIdempotencyKey = 'invalid_idempotency_key';
+export const ErrIdempotencyKeyReused = 'idempotency_key_reused';

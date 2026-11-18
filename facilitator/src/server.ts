@@ -36,6 +36,7 @@ import {
 } from './bazaar.js';
 import { listDiscoveryResources, type DiscoveryResourceType } from './discoveryStore.js';
 import { resolveSellerDeclaration } from './sellerDeclaration.js';
+import { IDEMPOTENCY_HEADER, parseIdempotencyKey } from './idempotency.js';
 import * as Errors from './errors.js';
 import type { SupportedKind, SupportedResponse, RequirementsRequest, PaymentRequired, NormalizedPayment } from './types.js';
 import type { BazaarEvaluation } from './bazaar.js';
@@ -377,6 +378,19 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
     });
   }
 
+  const idempotency = parseIdempotencyKey(req.headers[IDEMPOTENCY_HEADER]);
+  if (!idempotency.ok) {
+    logger.warn('Invalid Idempotency-Key', { message: idempotency.message });
+    return res.status(400).json({
+      success: false,
+      errorReason: Errors.ErrInvalidIdempotencyKey,
+      errorMessage: idempotency.message,
+      payer: parsed.payment.authorization.from,
+      transaction: '',
+      network: config.network,
+    });
+  }
+
   let bazaarResponse: BazaarExtensionResponse | undefined;
 
   try {
@@ -409,7 +423,9 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
           nonceLogger.info('Bazaar declaration finished after the response', { status: status?.status, rejectedReason: status?.rejectedReason });
         });
       },
-    } : undefined);
+    } : undefined, idempotency.key);
+
+    if (result.extra?.idempotentReplay) res.setHeader('Idempotent-Replayed', 'true');
 
     // The hook never ran: the payment did not confirm, so no verdict is reported for the
     // declaration. A pending broadcast may still land (retry reconciles it), so say

@@ -58,10 +58,10 @@ This starts a PostgreSQL 16 container with:
 
 The migrations are automatically applied when the container starts (via `docker-entrypoint-initdb.d`).
 
-To manually run migrations (using your configured password):
+To manually run migrations (using your configured password), apply every file in `migrations/` in order:
 
 ```bash
-psql "$DATABASE_URL" -f migrations/001_init.sql
+for f in migrations/*.sql; do psql "$DATABASE_URL" -f "$f"; done
 ```
 
 ### 4. Verify Configuration
@@ -106,10 +106,10 @@ Use a managed database service:
 
 1. Create a PostgreSQL database
 2. Note the connection string
-3. Run migrations:
+3. Run migrations, every file in order:
 
 ```bash
-psql $DATABASE_URL -f facilitator/migrations/001_init.sql
+for f in facilitator/migrations/*.sql; do psql "$DATABASE_URL" -f "$f"; done
 ```
 
 4. Configure environment:
@@ -168,6 +168,13 @@ psql "$DATABASE_URL" -f facilitator/migrations/004_merchant_contact_info.sql
 
 # Fee tracking (required for admin dashboard)
 psql "$DATABASE_URL" -f facilitator/migrations/005_add_fee_columns.sql
+
+# Bazaar discovery catalog
+psql "$DATABASE_URL" -f facilitator/migrations/006_discovery_resources.sql
+psql "$DATABASE_URL" -f facilitator/migrations/007_discovery_origins.sql
+
+# Idempotency-Key bindings for POST /settle
+psql "$DATABASE_URL" -f facilitator/migrations/008_settle_idempotency.sql
 ```
 
 ## Database Schema

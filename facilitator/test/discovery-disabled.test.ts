@@ -79,7 +79,6 @@ describe('with DISCOVERY_ENABLED unset', () => {
     expect(decodeExtensionResponses(header)).toBeNull();
     expect(evaluateBazaarDeclaration).not.toHaveBeenCalled();
     expect(settlePayment).toHaveBeenCalledTimes(1);
-    expect(settlePayment.mock.calls[0]).toHaveLength(4);
     expect((settlePayment.mock.calls[0] as unknown[])[3]).toBeUndefined();
   });
 

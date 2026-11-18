@@ -143,6 +143,7 @@ See the [root README](../README.md#error-codes) for the full request/response re
 
 - `payTo` is always the facilitator's signer address from `GET /supported` (`signers["eip155:*"][0]`).
 - The merchant that gets paid is the one tied to the API key on `/settle`. Keep that key on the server.
+- To stop a buyer who re-signs after a timeout from paying twice, send an `Idempotency-Key` header on `/settle` that stays the same for one purchase (an order ID, or a key the buyer sends you). The SDK calls `createAuthHeaders()` before every settle but passes it no request, so keep the current purchase's key in an `AsyncLocalStorage` set by your route and add it only when one is set: `settle: { 'X-API-Key': ..., ...(key && { 'Idempotency-Key': key }) }` with `const key = store.getStore()`. Never send a fixed fallback value, which would make unrelated purchases share a key. Or call `/settle` directly. See [facilitator/README.md](../facilitator/README.md#idempotency-key).
 - The price is the gross amount the buyer pays and must be at least the gas fee (0.10 USDC by default).
 - Only the `exact` scheme with EIP-3009 (USDC) is supported; Permit2 and ERC-7710 payloads are rejected.
 - x402 v1 payloads (`X-PAYMENT` header, legacy network names) are still accepted for backward compatibility.

@@ -5,14 +5,15 @@
  * The repository has no migration runner: docker-compose mounts `migrations/` into
  * `docker-entrypoint-initdb.d`, which Postgres runs only when it initializes an empty
  * data directory. On a database that already exists, a new migration therefore has to be
- * applied deliberately — this script is how.
+ * applied deliberately, and this script is how.
  *
  * Usage:
  *   pnpm migrate migrations/006_discovery_resources.sql
  *   pnpm migrate migrations/007_discovery_origins.sql
+ *   pnpm migrate migrations/008_settle_idempotency.sql
  *
  * Only migrations written to be idempotent (CREATE ... IF NOT EXISTS throughout) are safe
- * to run this way; 006 and 007 are. It does not track which migrations have run, so it will not
+ * to run this way; 006, 007 and 008 are. It does not track which migrations have run, so it will not
  * bring an old database up to date on its own.
  */
 
@@ -24,7 +25,7 @@ import { Pool } from 'pg';
 async function main(): Promise<void> {
   const file = process.argv[2];
   if (!file) {
-    console.error('Usage: pnpm migrate <path-to-migration.sql>   (idempotent: 006_discovery_resources.sql, 007_discovery_origins.sql)');
+    console.error('Usage: pnpm migrate <path-to-migration.sql>   (idempotent: 006_discovery_resources.sql, 007_discovery_origins.sql, 008_settle_idempotency.sql)');
     process.exit(1);
   }
   if (!process.env.DATABASE_URL) {
