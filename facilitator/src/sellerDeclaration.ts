@@ -173,7 +173,8 @@ export async function resolveSellerDeclaration(
     },
   };
 
-  const verdict = await evaluateBazaarDeclaration(sellerPayment, logger);
+  // Only ever reached after a confirmed, authenticated settle, so the settle lane
+  const verdict = await evaluateBazaarDeclaration(sellerPayment, logger, 'settle');
   if (!verdict.declared) {
     return { kind: 'rejected', rejectedReason: REJECTED_SELLER_NO_BAZAAR };
   }

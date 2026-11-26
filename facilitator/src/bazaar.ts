@@ -8,7 +8,7 @@ import type { Address } from 'viem';
 import type { Response } from 'express';
 import type { NormalizedPayment } from './types.js';
 import { indexIfOriginRegistered, type DiscoveryMetadata, type IndexOutcome } from './discoveryStore.js';
-import { validateDeclarationSchema } from './schemaGuard.js';
+import { validateDeclarationSchema, type SchemaLane } from './schemaGuard.js';
 import { screenResourceUrl } from './resourceUrl.js';
 import { DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS, DISCOVERY_MAX_DECLARATION_BYTES } from './config.js';
 import type { Logger } from './logging.js';
@@ -71,8 +71,14 @@ export function hasBazaarDeclaration(payment: NormalizedPayment): boolean {
 /**
  * Validate the bazaar declaration echoed in a payment payload, without side effects.
  * Returns `declared: false` when the payload carries no bazaar extension.
+ * `lane` picks the schema validator queue: `verify` for unauthenticated /verify traffic,
+ * `settle` for authenticated settlements (see schemaGuard.ts).
  */
-export async function evaluateBazaarDeclaration(payment: NormalizedPayment, logger: Logger): Promise<BazaarEvaluation> {
+export async function evaluateBazaarDeclaration(
+  payment: NormalizedPayment,
+  logger: Logger,
+  lane: SchemaLane
+): Promise<BazaarEvaluation> {
   if (!hasBazaarDeclaration(payment)) {
     return { declared: false };
   }
@@ -144,7 +150,7 @@ export async function evaluateBazaarDeclaration(payment: NormalizedPayment, logg
   // `info` must satisfy the declaration's own schema; external $ref/$id are refused inside.
   // Both schema and info are attacker-controlled and Ajv compiles `pattern` to a bare
   // RegExp, so this runs in a worker under a hard timeout (see schemaGuard.ts).
-  const schemaResult = await validateDeclarationSchema(declaration);
+  const schemaResult = await validateDeclarationSchema(declaration, lane);
   if (!schemaResult.valid) {
     // A timeout and a saturated validator are both "no verdict reached", not findings about
     // the declaration: a slow match can equally mean a hostile regex or a starved CPU, and

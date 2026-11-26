@@ -18,11 +18,11 @@ afterAll(async () => {
 
 describe('evaluateBazaarDeclaration', () => {
   it('reports declared: false when the payload carries no bazaar extension', async () => {
-    expect(await evaluateBazaarDeclaration(normalizedPayment(undefined), logger)).toEqual({ declared: false });
+    expect(await evaluateBazaarDeclaration(normalizedPayment(undefined), logger, 'verify')).toEqual({ declared: false });
   });
 
   it('accepts a declaration produced by declareDiscoveryExtension', async () => {
-    const result = await evaluateBazaarDeclaration(normalizedPayment(validBazaarDeclaration()), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(validBazaarDeclaration()), logger, 'verify');
     expect(result.declared).toBe(true);
     if (!result.declared || !result.valid) throw new Error('expected valid');
     expect(result.resource.resourceUrl).toBe('https://api.example.com/analyze');
@@ -33,7 +33,8 @@ describe('evaluateBazaarDeclaration', () => {
   it('rejects an unknown input type without throwing', async () => {
     const result = await evaluateBazaarDeclaration(
       normalizedPayment({ info: { input: { type: 'grpc' } }, schema: { type: 'object' } }),
-      logger
+      logger,
+      'verify'
     );
     expect(result).toMatchObject({ declared: true, valid: false });
     expect((result as any).rejectedReason).toMatch(/input.type must be "http" or "mcp"/);
@@ -42,7 +43,7 @@ describe('evaluateBazaarDeclaration', () => {
   it('rejects a schema that references an external document', async () => {
     const declaration = validBazaarDeclaration();
     (declaration.schema as any).$ref = 'https://evil.example/schema.json';
-    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger, 'verify');
     expect(result).toMatchObject({ declared: true, valid: false });
     expect((result as any).rejectedReason).toMatch(/external \$ref/);
   });
@@ -52,45 +53,45 @@ describe('evaluateBazaarDeclaration', () => {
     // Narrow the schema's method enum so a method the allowlist accepts still fails it
     (declaration.schema as any).properties.input.properties.method.enum = ['GET'];
     (declaration.info as any).input.method = 'HEAD';
-    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger, 'verify');
     expect(result).toMatchObject({ declared: true, valid: false });
     expect((result as any).rejectedReason).toMatch(/schema validation/);
   });
 
   it('refuses an mcp declaration: there is no seller 402 to catalogue it from', async () => {
     const declaration = declareDiscoveryExtension({ toolName: 'analyze', inputSchema: { type: 'object', properties: {} } }).bazaar;
-    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger, 'verify');
     expect(result).toEqual({ declared: true, valid: false, rejectedReason: REJECTED_MCP_NOT_SUPPORTED });
   });
 
   it('refuses a method other than GET or HEAD, since the seller is probed with it', async () => {
     const declaration = validBazaarDeclaration();
     (declaration.info as any).input.method = 'DELETE'; // in the SDK's own enum, so only the allowlist stops it
-    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger, 'verify');
     expect(result).toEqual({ declared: true, valid: false, rejectedReason: REJECTED_UNSUPPORTED_METHOD });
   });
 
   it('accepts a HEAD declaration', async () => {
     const declaration = validBazaarDeclaration();
     (declaration.info as any).input.method = 'HEAD';
-    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger, 'verify');
     expect(result).toMatchObject({ declared: true, valid: true });
   });
 
   it('rejects an http declaration with no method', async () => {
     const declaration = validBazaarDeclaration();
     delete (declaration.info as any).input.method;
-    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger, 'verify');
     expect((result as any).rejectedReason).toMatch(/method is required/);
   });
 
   it('rejects a relative resource url', async () => {
-    const result = await evaluateBazaarDeclaration(normalizedPayment(validBazaarDeclaration(), '/analyze'), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(validBazaarDeclaration(), '/analyze'), logger, 'verify');
     expect((result as any).rejectedReason).toMatch(/absolute http\(s\) URL/);
   });
 
   it('rejects a loopback resource url, so the catalog cannot point agents inward', async () => {
-    const result = await evaluateBazaarDeclaration(normalizedPayment(validBazaarDeclaration(), LOOPBACK_RESOURCE_URL), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(validBazaarDeclaration(), LOOPBACK_RESOURCE_URL), logger, 'verify');
     expect(result).toMatchObject({ declared: true, valid: false });
     expect((result as any).rejectedReason).toMatch(/loopback/);
   });
@@ -98,14 +99,15 @@ describe('evaluateBazaarDeclaration', () => {
   it('rejects a link-local resource url', async () => {
     const result = await evaluateBazaarDeclaration(
       normalizedPayment(validBazaarDeclaration(), 'http://169.254.169.254/latest/meta-data/'),
-      logger
+      logger,
+      'verify'
     );
     expect((result as any).rejectedReason).toMatch(/IP literal/);
   });
 
   it('catalogues origin + routeTemplate when the declaration carries a route template', async () => {
     const declaration = { ...validBazaarDeclaration(), routeTemplate: '/users/:id' };
-    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger, 'verify');
     if (!result.declared || !result.valid) throw new Error('expected valid');
     expect(result.resource.resourceUrl).toBe('https://api.example.com/users/:id');
   });
@@ -113,7 +115,7 @@ describe('evaluateBazaarDeclaration', () => {
   it('rejects a route template that makes the catalogued url over-long, though resource.url is short', async () => {
     // Under the declaration byte bound, so only the derived-URL screen can catch it
     const declaration = { ...validBazaarDeclaration(), routeTemplate: `/${'a'.repeat(3000)}` };
-    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger, 'verify');
     expect(result).toMatchObject({ declared: true, valid: false });
     expect((result as any).rejectedReason).toMatch(/routeTemplate.*at most \d+ characters/);
   });
@@ -121,13 +123,13 @@ describe('evaluateBazaarDeclaration', () => {
   it('rejects an oversized declaration before any schema work', async () => {
     const declaration = validBazaarDeclaration();
     (declaration.info as any).padding = 'x'.repeat(20_000);
-    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger);
+    const result = await evaluateBazaarDeclaration(normalizedPayment(declaration), logger, 'verify');
     expect((result as any).rejectedReason).toMatch(/at most \d+ bytes/);
   });
 
   it('rejects non-object declarations', async () => {
-    expect((await evaluateBazaarDeclaration(normalizedPayment('nope'), logger) as any).rejectedReason).toMatch(/must be an object/);
-    expect((await evaluateBazaarDeclaration(normalizedPayment({ info: {} }), logger) as any).rejectedReason).toMatch(/schema is required/);
+    expect((await evaluateBazaarDeclaration(normalizedPayment('nope'), logger, 'verify') as any).rejectedReason).toMatch(/must be an object/);
+    expect((await evaluateBazaarDeclaration(normalizedPayment({ info: {} }), logger, 'verify') as any).rejectedReason).toMatch(/schema is required/);
   });
 });
 

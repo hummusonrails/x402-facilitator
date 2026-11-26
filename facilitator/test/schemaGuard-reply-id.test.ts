@@ -67,7 +67,7 @@ afterEach(async () => {
 describe('schema guard reply ids', () => {
   it('ignores a reply whose id does not match the job in flight', async () => {
     let settled: unknown = null;
-    const pending = validateDeclarationSchema({ info: {}, schema: {} }).then((r) => (settled = r));
+    const pending = validateDeclarationSchema({ info: {}, schema: {} }, 'verify').then((r) => (settled = r));
 
     const worker = FakeWorker.instances[0];
     await dispatched(worker, 1);
@@ -86,14 +86,14 @@ describe('schema guard reply ids', () => {
 
   it('does not let a killed job’s late reply resolve the next job', async () => {
     // First job never answers, so the timeout fires and terminates its worker
-    const first = await validateDeclarationSchema({ info: {}, schema: {} });
+    const first = await validateDeclarationSchema({ info: {}, schema: {} }, 'verify');
     expect(first).toMatchObject({ valid: false, timedOut: true });
     const firstWorker = FakeWorker.instances[0];
     expect(firstWorker.terminated).toBe(true);
     const staleId = firstWorker.posted[0].id;
 
     let settled: unknown = null;
-    const second = validateDeclarationSchema({ info: {}, schema: {} }).then((r) => (settled = r));
+    const second = validateDeclarationSchema({ info: {}, schema: {} }, 'verify').then((r) => (settled = r));
 
     const secondWorker = FakeWorker.instances[1];
     expect(secondWorker).not.toBe(firstWorker);
@@ -108,5 +108,36 @@ describe('schema guard reply ids', () => {
     secondWorker.reply(secondWorker.posted[0].id, { valid: false, errors: ['genuine violation'] });
     await second;
     expect(settled).toEqual({ valid: false, errors: ['genuine violation'] });
+  });
+});
+
+describe('schema guard shutdown', () => {
+  // This fake does not emit `exit` on terminate(), so nothing but shutdown itself can clear a
+  // dead worker: a lane that kept its guard (or its worker) across shutdown would hand the
+  // next job to the terminated one, where it would sit unanswered.
+  it('gives each lane a fresh worker after shutdown instead of reusing the terminated one', async () => {
+    for (const lane of ['verify', 'settle'] as const) {
+      const before = validateDeclarationSchema({ info: {}, schema: {} }, lane);
+      const worker = FakeWorker.instances.at(-1)!;
+      await dispatched(worker, 1);
+      worker.reply(worker.posted[0].id, { valid: true });
+      expect(await before).toEqual({ valid: true });
+    }
+    const old = [...FakeWorker.instances];
+    expect(old).toHaveLength(2);
+
+    await shutdownSchemaGuard();
+    expect(old.every((worker) => worker.terminated)).toBe(true);
+
+    for (const lane of ['verify', 'settle'] as const) {
+      const after = validateDeclarationSchema({ info: {}, schema: {} }, lane);
+      const fresh = FakeWorker.instances.at(-1)!;
+      expect(old).not.toContain(fresh);
+      await dispatched(fresh, 1);
+      fresh.reply(fresh.posted[0].id, { valid: true });
+      expect(await after).toEqual({ valid: true });
+    }
+    expect(FakeWorker.instances).toHaveLength(4);
+    expect(old.every((worker) => worker.posted.length === 1)).toBe(true);
   });
 });
