@@ -19,6 +19,19 @@ vi.mock('../src/discoveryStore.js', () => ({
   isOriginRegistered: async () => registered,
 }));
 
+// The real validator, with the lane of every call recorded
+const lanes: string[] = [];
+vi.mock('../src/schemaGuard.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/schemaGuard.js')>();
+  return {
+    ...original,
+    validateDeclarationSchema: (declaration: unknown, lane: 'verify' | 'settle') => {
+      lanes.push(lane);
+      return original.validateDeclarationSchema(declaration, lane);
+    },
+  };
+});
+
 const { evaluateBazaarDeclaration, REJECTED_ORIGIN_NOT_REGISTERED, REJECTED_UNSUPPORTED_METHOD } = await import('../src/bazaar.js');
 const {
   probeSeller,
@@ -125,8 +138,9 @@ function forgedPayment(path: string, info?: (info: any) => void): NormalizedPaym
 
 async function resolve(path: string, info?: (info: any) => void) {
   const payment = forgedPayment(path, info);
-  const echo = await evaluateBazaarDeclaration(payment, logger);
+  const echo = await evaluateBazaarDeclaration(payment, logger, 'settle');
   if (!echo.declared || !echo.valid) return { echo, result: undefined };
+  lanes.length = 0;
   return { echo, result: await resolveSellerDeclaration(echo.resource, payment, MERCHANT, logger) };
 }
 
@@ -145,6 +159,8 @@ describe("resolveSellerDeclaration: the catalogue comes from the seller's 402", 
     expect(result.resource.extensions).toEqual({ bazaar: validBazaarDeclaration() });
     expect(result.payment.raw.paymentRequirements).toEqual(requirements);
     expect(hits).toEqual([{ path: '/analyze', method: 'GET' }]);
+    // The seller's copy is validated on the settle lane, never the verify one
+    expect(lanes).toEqual(['settle']);
   });
 
   it('asks the seller with the declared method, HEAD included', async () => {

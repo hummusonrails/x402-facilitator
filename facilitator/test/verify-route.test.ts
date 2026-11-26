@@ -114,6 +114,12 @@ describe('POST /verify with a bazaar declaration', () => {
     expect(header).toEqual({ bazaar: { status: 'processing' } });
   });
 
+  it("validates on the verify lane, so replayed /verify traffic cannot fill the settle lane's queue", async () => {
+    await verify(facilitatorRequest(validBazaarDeclaration()));
+    expect(evaluateBazaarDeclaration).toHaveBeenCalledTimes(1);
+    expect(evaluateBazaarDeclaration.mock.calls[0][2]).toBe('verify');
+  });
+
   it('sends no header when the payload carries no declaration', async () => {
     const { status, header } = await verify(facilitatorRequest(undefined));
     expect(status).toBe(200);

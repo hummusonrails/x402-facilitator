@@ -105,6 +105,15 @@ async function settle(body: unknown) {
 }
 
 describe('POST /settle with a bazaar declaration', () => {
+  it('validates on the settle lane, which unauthenticated /verify traffic cannot reach', async () => {
+    evaluateBazaarDeclaration.mockResolvedValue(VALID);
+    settlePayment.mockImplementation(confirmingSettle);
+
+    await settle(facilitatorRequest(validBazaarDeclaration()));
+    expect(evaluateBazaarDeclaration).toHaveBeenCalledTimes(1);
+    expect(evaluateBazaarDeclaration.mock.calls[0][2]).toBe('settle');
+  });
+
   it('starts settlement while the declaration is still being validated', async () => {
     const verdict = deferred<unknown>();
     evaluateBazaarDeclaration.mockReturnValue(verdict.promise);

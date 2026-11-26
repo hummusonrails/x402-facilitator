@@ -106,9 +106,10 @@ On `/settle` the verdict is tied to the payment. Validation starts alongside the
 On `/verify` the declaration is evaluated only once the payment itself verifies. Validating a declaration means compiling and running a JSON Schema the caller supplied, and `/verify` is unauthenticated, so an unsigned payload gets no header and buys no schema work. `/verify` waits for the verdict for at most `DISCOVERY_SCHEMA_TIMEOUT_MS`, then reports `processing`. An evaluation that fails outright also reports `processing` rather than a 500. The payment result is never affected.
 
 #### Declaration hardening
-The declaration reaching `/verify` and `/settle` is attacker-controlled on both halves: the client supplies `schema` and the `info` it is checked against. Three things bound what that can cost:
+The declaration reaching `/verify` and `/settle` is attacker-controlled on both halves: the client supplies `schema` and the `info` it is checked against. These bound what that can cost:
 
 - **Schema validation runs in a worker thread under a hard timeout** (`DISCOVERY_SCHEMA_TIMEOUT_MS`, default 250ms). Ajv compiles a schema `pattern` to a plain `RegExp` with no linear-time guarantee, so a declaration like `{"pattern": "^(a+)+$"}` matched against `"aaaa…b"` backtracks exponentially. On the main thread that blocks the event loop for the whole process. A validation that overruns has its worker killed and the declaration is reported `processing`, not `rejected`: a slow match can mean a hostile regex or simply a busy box, and the facilitator cannot tell which, so it makes no claim about the declaration. Nothing is indexed either way.
+- **`/verify` and `/settle` validate on separate workers.** `/verify` is unauthenticated and does not consume the nonce, so a replayed payload could otherwise keep a shared validator busy and starve real settlements. Each has its own worker and queue: 32 jobs for `/verify`, 64 for `/settle` (each settle queues two, the echo and the seller's copy). Replays can only saturate `/verify`'s own, advisory, verdicts.
 - **Declarations over `DISCOVERY_MAX_DECLARATION_BYTES`** (default 16KB) are refused before any schema work.
 - **The catalog is built from the seller's own 402, not the buyer's echo.** The seller SDK checks only the echoed `info`, so the echo's `schema`, `routeTemplate` and `resource` block are the buyer's to write. After the payment confirms, `/settle` requests the paid URL from the seller (registered origins only, `GET`/`HEAD` only, no payment or credentials, no redirects, `DISCOVERY_SELLER_TIMEOUT_MS`, body unread) and catalogues the declaration, `resource` block and matching `accepts` entry from its `PAYMENT-REQUIRED` header. A seller that does not answer with a usable 402 is reported `processing`; a 402 without a bazaar declaration, or without an `accepts` entry matching what was settled, is `rejected`. `/verify` never makes the request.
 - **Resource URLs are screened** before they enter the catalog: loopback names, IPv4 literals, decimal- and hex-encoded hosts, IPv6 literals, internal-use suffixes and bare hostnames are all refused, as are URLs carrying credentials. A catalogued URL is one that agents call unattended, so the catalog must not be able to point them at `http://169.254.169.254/` or back at a private network. Set `DISCOVERY_ALLOW_PRIVATE_RESOURCE_URLS=true` to develop against a seller on localhost. The same screen, including its 2048-character limit, is applied again to the URL that is actually stored (origin + the declaration's `routeTemplate`).
@@ -120,7 +121,7 @@ The declaration reaching `/verify` and `/settle` is attacker-controlled on both 
 - **Only `GET` and `HEAD` HTTP resources are catalogued.** MCP declarations, and any other method, are rejected until each has a safe way to obtain the seller's own declaration.
 - **One outbound request per indexed settlement.** It goes only to registered origins, but the path is the buyer's, so a buyer can make the facilitator `GET` or `HEAD` any path on the merchant's own registered origin (status and headers stay in our logs; the body is never read). An origin whose DNS resolves to a private address would also be requested, so register only origins you are happy for the facilitator to call.
 - **One origin cannot front several merchants.** A marketplace serving many merchants behind one origin can't be represented, since the path isn't part of an origin. That is deliberate: loosening one-merchant-per-origin later is easy, tightening it is not.
-- **`/verify` and `/settle` share one schema validation queue.** `/verify` is unauthenticated and does not consume the nonce, so a replayed payload with a slow schema can fill the queue and push declarations on real settlements onto the deferred path above. Honest `/verify` calls meanwhile wait out their deadline and report `processing`; a saturated validator adds at most `DISCOVERY_SCHEMA_TIMEOUT_MS` to `/verify` and to the settle hook.
+- **Replayed `/verify` traffic can still saturate `/verify`.** A replayed payload with a slow schema can keep the `/verify` validator busy, so honest `/verify` calls wait out their deadline and report `processing`. Settlements validate on their own worker and are unaffected; a saturated validator adds at most `DISCOVERY_SCHEMA_TIMEOUT_MS` to the call it serves.
 
 Details in [`../docs/BAZAAR_DISCOVERY.md`](../docs/BAZAAR_DISCOVERY.md#known-limitations).
 
@@ -349,8 +350,9 @@ MAX_SETTLEMENT_AMOUNT=1000000000
 DISCOVERY_ENABLED=false
 # Bazaar discovery hardening (only used when discovery is enabled)
 # Hard timeout for the worker that validates a declaration's JSON Schema, and the longest
-# /verify and the settle hook wait for a verdict (default: 250). The first evaluation spawns
-# the validator worker (~100ms), so a budget below that reports processing on the first call
+# /verify and the settle hook wait for a verdict (default: 250). The first evaluation on each lane
+# (the first /verify and the first /settle) spawns its worker (~100ms), so a budget below that
+# reports processing on the first call of each
 DISCOVERY_SCHEMA_TIMEOUT_MS=250
 # Largest bazaar declaration accepted, in bytes (default: 16384)
 DISCOVERY_MAX_DECLARATION_BYTES=16384

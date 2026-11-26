@@ -162,18 +162,30 @@ against `"aaaa…b"` costs time exponential in the length of the data. Node is
 single-threaded: on the main thread that is not a slow request, it is the whole process
 frozen, and the rate limiter cannot answer either. The validation therefore happens on a
 worker thread that can be killed, and overrunning `DISCOVERY_SCHEMA_TIMEOUT_MS` (250ms by
-default) kills it. One long-lived worker serves every request, since a worker busy
+default) kills it. Each lane (below) has one long-lived worker, since a worker busy
 backtracking cannot serve anything else anyway.
 
 A timeout and a saturated queue both report `processing`, never `rejected`: no verdict was
 reached, and a slow match can equally mean a hostile regex or a starved CPU. Claiming the
 declaration is bad would condemn honest sellers whenever the box is busy, and it buys
 nothing — the row is not indexed either way and the payment is untouched. Worker startup
-(~100ms to spawn the thread and load the SDK) is deliberately not charged against the
-validation budget, for the same reason.
+(~100ms to spawn the thread and load the SDK, once per lane: on the first `/verify` and on the first `/settle`) is
+deliberately not charged against the validation budget, for the same reason.
 
-**Settlement never waits on discovery.** The validator queue is
-shared with unauthenticated `/verify`, so on `/settle` the evaluation starts alongside the settlement instead of
+**One validator per trust boundary.** `/verify` is unauthenticated and does not consume the nonce, so a single
+validly signed payload can be replayed against it as often as the rate limiter allows. If `/verify` and `/settle`
+shared a validator, those replays could keep it busy and push real settlements' declarations onto `unavailable`. So
+there are two lanes, each with its own worker thread and queue (`MAX_QUEUE_DEPTH` in `src/schemaGuard.ts`):
+
+- **`verify`** serves `/verify` only. Its queue holds 32 jobs.
+- **`settle`** serves `/settle`: the buyer's echo, then the seller's own declaration. It is reached only by an
+  authenticated, rate-limited settle whose payment confirmed. Each settle queues two jobs here, so its queue holds 64,
+  keeping the capacity a single shared queue used to give it.
+
+Replayed `/verify` traffic can therefore only saturate `/verify`'s own verdicts, which are advisory anyway
+(`processing` for a valid declaration). Settlements keep getting verdicts and keep being catalogued.
+
+**Settlement never waits on discovery.** On `/settle` the evaluation starts alongside the settlement instead of
 before it, and the payer's transfer is submitted without waiting for a verdict. The verdict is awaited only in the
 post-confirmation hook, which sits before the merchant forward, and only for up to `DISCOVERY_SCHEMA_TIMEOUT_MS`.
 Normally it arrived long before the transfer confirmed and is reported as is (`rejected` with its reason, or
@@ -320,9 +332,8 @@ Three rules hold the catalog together:
 
 ## Known limitations
 
-Two gaps are known and deliberately not yet closed. Both affect how reliably a declaration makes it into the catalog
-under load. Neither can hold up a payment for longer than `DISCOVERY_SCHEMA_TIMEOUT_MS`: that is the most a saturated
-validator adds to `/verify`, and to the settle hook after the payer's transfer has landed.
+Several limitations remain. None can hold up a payment for longer than `DISCOVERY_SCHEMA_TIMEOUT_MS`: that is the
+most a saturated validator adds to `/verify`, and to the settle hook after the payer's transfer has landed.
 
 **A declaration no verdict is reached on is lost.** When the schema validator is saturated or a validation times
 out, the declaration is reported `processing` and the settle carries on: the payment confirms and the nonce is
@@ -333,15 +344,11 @@ response and the verdict loses that one entry the same way. Closing this means s
 (`src/recovery.ts`) to index it, which is a schema change plus a worker change. A small, honest declaration on an idle
 facilitator does not hit this path; a third-party declaration under load can.
 
-**The schema validator queue is shared across trust boundaries.** One worker and one 32-deep queue
-(`MAX_QUEUE_DEPTH` in `src/schemaGuard.ts`) serve both unauthenticated `/verify` and authenticated `/settle`.
-`/verify` does not consume the nonce, so a single validly signed payload carrying a declaration with a backtracking
-`pattern` can be replayed against `/verify` to keep the queue full. Each replay costs the facilitator up to
-`DISCOVERY_SCHEMA_TIMEOUT_MS` of worker time, and declarations on real settlements arriving meanwhile get
-`unavailable` or time out, are reported `processing`, and are then lost as described above. Honest
-`/verify` calls meanwhile wait out their deadline and report `processing`. Payments go through, each delayed by at
-most `DISCOVERY_SCHEMA_TIMEOUT_MS` per call. The rate limiter is the only thing bounding the queue today.
-The remedy (separate queues per trust level, or a per-caller budget) is an open design decision.
+**Replayed `/verify` traffic can still saturate `/verify`.** A validly signed payload carrying a backtracking
+`pattern` can be replayed against `/verify` to keep the verify lane busy, so honest `/verify` calls wait out their
+deadline and report `processing`. That lane is all it reaches: settlements validate on their own lane and are
+unaffected (see "One validator per trust boundary" above). Each replay costs the facilitator up to
+`DISCOVERY_SCHEMA_TIMEOUT_MS` of worker time on a separate thread, and the rate limiter bounds how often it happens.
 
 **Only GET and HEAD HTTP resources are catalogued.** An MCP declaration is rejected with `mcp declarations are not
 catalogued yet`: an MCP tool's terms come back in a tool result, not an HTTP response, so there is no seller copy to

@@ -40,6 +40,7 @@ import { IDEMPOTENCY_HEADER, parseIdempotencyKey } from './idempotency.js';
 import * as Errors from './errors.js';
 import type { SupportedKind, SupportedResponse, RequirementsRequest, PaymentRequired, NormalizedPayment } from './types.js';
 import type { BazaarEvaluation } from './bazaar.js';
+import type { SchemaLane } from './schemaGuard.js';
 
 /**
  * Wire status for a declaration that has not been indexed yet. A declaration we reached no
@@ -67,8 +68,8 @@ function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | undefined
  * is created, so a rejection cannot go unhandled before the caller awaits it; a crash in
  * the evaluation is reported like a timeout (deferred, so `processing`), never as a rejection.
  */
-function startBazaarEvaluation(payment: NormalizedPayment, logger: Logger): Promise<BazaarEvaluation> {
-  return evaluateBazaarDeclaration(payment, logger).catch((error: any): BazaarEvaluation => {
+function startBazaarEvaluation(payment: NormalizedPayment, logger: Logger, lane: SchemaLane): Promise<BazaarEvaluation> {
+  return evaluateBazaarDeclaration(payment, logger, lane).catch((error: any): BazaarEvaluation => {
     logger.error('Bazaar evaluation failed', { error: error.message });
     return { declared: true, valid: false, deferred: true };
   });
@@ -339,7 +340,7 @@ app.post('/verify', async (req: Request, res: Response) => {
     // budget; past that the answer is processing. The queued job still runs to completion:
     // the deadline bounds this response, not the shared validator queue.
     if (DISCOVERY_ENABLED && response.isValid && hasBazaarDeclaration(parsed.payment)) {
-      const bazaar = await withDeadline(startBazaarEvaluation(parsed.payment, nonceLogger), DISCOVERY_SCHEMA_TIMEOUT_MS);
+      const bazaar = await withDeadline(startBazaarEvaluation(parsed.payment, nonceLogger, 'verify'), DISCOVERY_SCHEMA_TIMEOUT_MS);
       if (!bazaar) {
         nonceLogger.warn('Bazaar verdict not ready by the deadline on /verify');
         setBazaarExtensionResponse(res, { status: 'processing' });
@@ -401,7 +402,7 @@ app.post('/settle', settleLimiter, authenticateMerchant, async (req: Request, re
     // created, so a rejection cannot go unhandled before the hook gets to await it.
     const evaluation: Promise<BazaarEvaluation> | undefined =
       DISCOVERY_ENABLED && hasBazaarDeclaration(parsed.payment)
-        ? startBazaarEvaluation(parsed.payment, nonceLogger)
+        ? startBazaarEvaluation(parsed.payment, nonceLogger, 'settle')
         : undefined;
 
     // With discovery off, or no declaration, no hooks are passed, so settlement runs exactly as it does without the extension
